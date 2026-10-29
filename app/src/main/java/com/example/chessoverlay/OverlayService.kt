@@ -68,102 +68,121 @@ class OverlayService : Service() {
         startForegroundNotification()
 
         val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
-        val data: Intent? = intent?.getParcelableExtra("DATA")
+        val data: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
+            intent?.getParcelableExtra("DATA", Intent::class.java)
+        } else {
+            @Suppress("DEPRECATION")
+            intent?.getParcelableExtra("DATA")
+        }
 
         if (resultCode == Activity.RESULT_OK && data != null) {
-            val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-            mediaProjection = mpManager.getMediaProjection(resultCode, data)
-            setupVirtualDisplay()
+            try {
+                val mpManager = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
+                mediaProjection = mpManager.getMediaProjection(resultCode, data)
+                setupVirtualDisplay()
+                Toast.makeText(this, "Đã mở thanh điều khiển thành công!", Toast.LENGTH_SHORT).show()
+            } catch (e: Exception) {
+                e.printStackTrace()
+                Toast.makeText(this, "Lỗi kết nối màn hình: ${e.message}", Toast.LENGTH_LONG).show()
+            }
         }
         return START_NOT_STICKY
     }
 
     private fun setupBoardOverlay() {
-        chessOverlayView = ChessOverlayView(this).apply {
-            boardTopY = (screenHeight - screenWidth) / 2f
-        }
+        try {
+            chessOverlayView = ChessOverlayView(this).apply {
+                boardTopY = (screenHeight - screenWidth) / 2f
+            }
 
-        val overlayParams = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.MATCH_PARENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
-                    WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
-                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
-            PixelFormat.TRANSLUCENT
-        )
-        windowManager.addView(chessOverlayView, overlayParams)
+            val overlayParams = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.MATCH_PARENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or
+                        WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                PixelFormat.TRANSLUCENT
+            )
+            windowManager.addView(chessOverlayView, overlayParams)
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     private fun setupFloatingControls() {
-        controlLayout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.argb(220, 25, 25, 25))
-            setPadding(16, 12, 16, 12)
-        }
+        try {
+            controlLayout = LinearLayout(this).apply {
+                orientation = LinearLayout.VERTICAL
+                setBackgroundColor(Color.argb(230, 25, 25, 25))
+                setPadding(16, 12, 16, 12)
+            }
 
-        tvStatus = TextView(this).apply {
-            text = "B1: Chỉnh khung khớp bàn cờ -> Bấm [1. Học mẫu]"
-            setTextColor(Color.YELLOW)
-            textSize = 11f
-        }
+            tvStatus = TextView(this).apply {
+                text = "B1: Chỉnh khung khớp bàn cờ -> Bấm [1. Học mẫu]"
+                setTextColor(Color.YELLOW)
+                textSize = 11f
+            }
 
-        val rowButtons = LinearLayout(this).apply {
-            orientation = LinearLayout.HORIZONTAL
-        }
+            val rowButtons = LinearLayout(this).apply {
+                orientation = LinearLayout.HORIZONTAL
+            }
 
-        val btnUp = createSmallButton("▲") {
-            chessOverlayView.boardTopY -= 15f
-            chessOverlayView.invalidate()
-        }
-        val btnDown = createSmallButton("▼") {
-            chessOverlayView.boardTopY += 15f
-            chessOverlayView.invalidate()
-        }
-        val btnCalibrate = createSmallButton("1. Học mẫu") {
-            calibrateFromStartingBoard()
-        }
-        val btnAnalyze = createSmallButton("2. Gợi ý") {
-            scanAndSuggestMove()
-        }
-        val btnAuto = createSmallButton("Auto: TẮT") { btn ->
-            isAutoMode = !isAutoMode
-            btn.text = if (isAutoMode) "Auto: BẬT" else "Auto: TẮT"
-            if (isAutoMode) runAutoLoop()
-        }
-        val btnFlip = createSmallButton("Phe: Trắng") { btn ->
-            chessOverlayView.isWhiteBottom = !chessOverlayView.isWhiteBottom
-            btn.text = if (chessOverlayView.isWhiteBottom) "Phe: Trắng" else "Phe: Đen"
-            chessOverlayView.invalidate()
-        }
-        val btnClose = createSmallButton("X") {
-            isAutoMode = false
-            stopSelf()
-        }
+            val btnUp = createSmallButton("▲") {
+                chessOverlayView.boardTopY -= 15f
+                chessOverlayView.invalidate()
+            }
+            val btnDown = createSmallButton("▼") {
+                chessOverlayView.boardTopY += 15f
+                chessOverlayView.invalidate()
+            }
+            val btnCalibrate = createSmallButton("1. Học mẫu") {
+                calibrateFromStartingBoard()
+            }
+            val btnAnalyze = createSmallButton("2. Gợi ý") {
+                scanAndSuggestMove()
+            }
+            val btnAuto = createSmallButton("Auto: TẮT") { btn ->
+                isAutoMode = !isAutoMode
+                btn.text = if (isAutoMode) "Auto: BẬT" else "Auto: TẮT"
+                if (isAutoMode) runAutoLoop()
+            }
+            val btnFlip = createSmallButton("Phe: Trắng") { btn ->
+                chessOverlayView.isWhiteBottom = !chessOverlayView.isWhiteBottom
+                btn.text = if (chessOverlayView.isWhiteBottom) "Phe: Trắng" else "Phe: Đen"
+                chessOverlayView.invalidate()
+            }
+            val btnClose = createSmallButton("X") {
+                isAutoMode = false
+                stopSelf()
+            }
 
-        rowButtons.addView(btnUp)
-        rowButtons.addView(btnDown)
-        rowButtons.addView(btnCalibrate)
-        rowButtons.addView(btnAnalyze)
-        rowButtons.addView(btnAuto)
-        rowButtons.addView(btnFlip)
-        rowButtons.addView(btnClose)
+            rowButtons.addView(btnUp)
+            rowButtons.addView(btnDown)
+            rowButtons.addView(btnCalibrate)
+            rowButtons.addView(btnAnalyze)
+            rowButtons.addView(btnAuto)
+            rowButtons.addView(btnFlip)
+            rowButtons.addView(btnClose)
 
-        controlLayout.addView(tvStatus)
-        controlLayout.addView(rowButtons)
+            controlLayout.addView(tvStatus)
+            controlLayout.addView(rowButtons)
 
-        val controlParams = WindowManager.LayoutParams(
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.WRAP_CONTENT,
-            WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
-            PixelFormat.TRANSLUCENT
-        ).apply {
-            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
-            y = 80
+            val controlParams = WindowManager.LayoutParams(
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.WRAP_CONTENT,
+                WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
+                PixelFormat.TRANSLUCENT
+            ).apply {
+                gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+                y = 80
+            }
+
+            windowManager.addView(controlLayout, controlParams)
+        } catch (e: Exception) {
+            e.printStackTrace()
         }
-
-        windowManager.addView(controlLayout, controlParams)
     }
 
     private fun createSmallButton(label: String, onClick: (Button) -> Unit): Button {
@@ -178,13 +197,26 @@ class OverlayService : Service() {
     }
 
     private fun setupVirtualDisplay() {
-        imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
-        virtualDisplay = mediaProjection?.createVirtualDisplay(
-            "ChessScreenCapture",
-            screenWidth, screenHeight, screenDensity,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
-            imageReader?.surface, null, null
-        )
+        try {
+            // Đăng ký Callback bắt buộc trên Android 14 để tránh crash
+            mediaProjection?.registerCallback(object : MediaProjection.Callback() {
+                override fun onStop() {
+                    super.onStop()
+                    virtualDisplay?.release()
+                    mediaProjection = null
+                }
+            }, mainHandler)
+
+            imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+            virtualDisplay = mediaProjection?.createVirtualDisplay(
+                "ChessScreenCapture",
+                screenWidth, screenHeight, screenDensity,
+                DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
+                imageReader?.surface, null, null
+            )
+        } catch (e: Exception) {
+            e.printStackTrace()
+        }
     }
 
     private fun captureBoardBitmap(): Bitmap? {
@@ -266,7 +298,7 @@ class OverlayService : Service() {
                         chessOverlayView.setMove(bestMove)
                         tvStatus.text = "Nên đi: ${bestMove.substring(0, 2)} -> ${bestMove.substring(2, 4)}"
                     } else {
-                        tvStatus.text = "Lỗi lấy nước đi (Kiểm tra mạng hoặc khung bàn cờ)"
+                        tvStatus.text = "Lỗi lấy nước đi (Kiểm tra mạng)"
                     }
                 }
             }

@@ -19,7 +19,7 @@ class ChessOverlayView(context: Context) : View(context) {
     private val borderPaint = Paint().apply {
         color = Color.argb(140, 0, 255, 0)
         style = Paint.Style.STROKE
-        strokeWidth = 5f
+        strokeWidth = 6f
     }
 
     private val highlightFromPaint = Paint().apply {

@@ -5,7 +5,10 @@ import android.content.Context
 import android.content.Intent
 import android.media.projection.MediaProjectionManager
 import android.net.Uri
+import android.os.Build
 import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import android.view.Gravity
 import android.widget.Button
@@ -65,12 +68,20 @@ class MainActivity : AppCompatActivity() {
             }
         } else if (requestCode == REQUEST_MEDIA_PROJECTION) {
             if (resultCode == Activity.RESULT_OK && data != null) {
+                Toast.makeText(this, "Đang mở cửa sổ nổi...", Toast.LENGTH_SHORT).show()
                 val serviceIntent = Intent(this, OverlayService::class.java).apply {
                     putExtra("RESULT_CODE", resultCode)
                     putExtra("DATA", data)
                 }
-                startForegroundService(serviceIntent)
-                moveTaskToBack(true)
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    startForegroundService(serviceIntent)
+                } else {
+                    startService(serviceIntent)
+                }
+                // Giữ app 1 giây để dịch vụ gắn cửa sổ nổi xong mới ẩn xuống nền (chống văng trên Android 14)
+                Handler(Looper.getMainLooper()).postDelayed({
+                    moveTaskToBack(true)
+                }, 1000)
             }
         }
     }
