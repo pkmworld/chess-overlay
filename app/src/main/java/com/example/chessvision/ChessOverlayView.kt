@@ -9,24 +9,22 @@ import kotlin.math.sin
 
 class ChessOverlayView(context: Context) : View(context) {
 
-    var boardTopY = 400f
-    var boardLeftX = 0f
-    var boardSize = 1080f
+    var detectedBoardRect: RectF? = null
     var isWhiteBottom = true
 
     private var fromSquare: String? = null
     private var toSquare: String? = null
 
     private val borderPaint = Paint().apply {
-        color = Color.argb(200, 0, 230, 118)
+        color = Color.argb(220, 0, 230, 118)
         style = Paint.Style.STROKE
-        strokeWidth = 6f
+        strokeWidth = 4f
     }
     
     private val gridPaint = Paint().apply {
         color = Color.argb(120, 255, 255, 255)
         style = Paint.Style.STROKE
-        strokeWidth = 2f
+        strokeWidth = 1.5f
     }
 
     private val highlightFromPaint = Paint().apply {
@@ -61,9 +59,11 @@ class ChessOverlayView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        
+        val board = detectedBoardRect ?: return
+
         canvas.save()
-        canvas.translate(boardLeftX, boardTopY)
+        canvas.translate(board.left, board.top)
+        val boardSize = board.width()
 
         canvas.drawRect(0f, 0f, boardSize, boardSize, borderPaint)
         val cellSize = boardSize / 8f
