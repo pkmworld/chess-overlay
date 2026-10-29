@@ -28,7 +28,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(64, 64, 64, 64)
         }
         val btnStart = Button(this).apply {
-            text = "KHỞI CHẠY AUTO VISION v4.1"
+            text = "KHỞI CHẠY AUTO VISION v4.1.1"
             textSize = 18f
             setOnClickListener { checkPermissionsAndStart() }
         }

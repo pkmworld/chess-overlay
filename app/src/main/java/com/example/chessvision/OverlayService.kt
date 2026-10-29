@@ -128,9 +128,13 @@ class OverlayService : Service() {
             textSize = 11f
         }
         
+        // CHIA LÀM 2 HÀNG ĐỂ KHÔNG BỊ TRÀN MÀN HÌNH
         val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val row2 = LinearLayout(this).apply { 
+            orientation = LinearLayout.HORIZONTAL
+            setPadding(0, 8, 0, 0)
+        }
         
-        // Nút điều chỉnh vị trí và kích thước khung
         val btnUp = createSmallButton("▲") {
             chessOverlayView.boardTopY -= 15f
             savePrefs()
@@ -151,23 +155,33 @@ class OverlayService : Service() {
             savePrefs()
             chessOverlayView.invalidate()
         }
-        val btnLearn = createSmallButton("1. Học") { triggerAutoLearn() }
+        
+        val btnLearn = createSmallButton("1. Học Cờ") { triggerAutoLearn() }
         val btnAuto = createSmallButton("2. Auto") { btn ->
             if (learnedEdges.isEmpty()) {
-                Toast.makeText(this, "Phải bấm [1. Học] trước!", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Phải bấm [1. Học Cờ] trước!", Toast.LENGTH_SHORT).show()
                 return@createSmallButton
             }
             isAutoMode = !isAutoMode
             btn.text = if (isAutoMode) "2. Đang Auto" else "2. Auto"
             if (isAutoMode) runAutoLoop()
         }
-        val btnClose = createSmallButton("✕") { stopSelf() }
+        val btnClose = createSmallButton("✕ Đóng") { stopSelf() }
 
-        row1.addView(btnUp); row1.addView(btnDown); row1.addView(btnZoomIn)
-        row1.addView(btnZoomOut); row1.addView(btnLearn); row1.addView(btnAuto); row1.addView(btnClose)
+        // Hàng 1: Di chuyển và Kích thước
+        row1.addView(btnUp)
+        row1.addView(btnDown)
+        row1.addView(btnZoomIn)
+        row1.addView(btnZoomOut)
+        
+        // Hàng 2: Học cờ, Auto, Đóng
+        row2.addView(btnLearn)
+        row2.addView(btnAuto)
+        row2.addView(btnClose)
 
         controlLayout.addView(tvStatus)
         controlLayout.addView(row1)
+        controlLayout.addView(row2)
 
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
@@ -187,7 +201,7 @@ class OverlayService : Service() {
 
     private fun createSmallButton(label: String, onClick: (Button) -> Unit): Button {
         return Button(this).apply {
-            text = label; textSize = 10f; setPadding(8, 4, 8, 4)
+            text = label; textSize = 11f; setPadding(12, 6, 12, 6)
             setOnClickListener { onClick(this) }
         }
     }
@@ -453,7 +467,7 @@ class OverlayService : Service() {
         val channelId = "chess_overlay_channel"
         val channel = NotificationChannel(channelId, "Chess Overlay", NotificationManager.IMPORTANCE_LOW)
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-        val notif = Notification.Builder(this, channelId).setContentTitle("Auto Vision v4.1").setSmallIcon(android.R.drawable.ic_menu_compass).build()
+        val notif = Notification.Builder(this, channelId).setContentTitle("Auto Vision v4.1.1").setSmallIcon(android.R.drawable.ic_menu_compass).build()
         startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
     }
 

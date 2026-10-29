@@ -65,7 +65,6 @@ class ChessOverlayView(context: Context) : View(context) {
         canvas.save()
         canvas.translate(boardLeftX, boardTopY)
 
-        // Vẽ khung và lưới 8x8 tuỳ chỉnh theo kích thước boardSize
         canvas.drawRect(0f, 0f, boardSize, boardSize, borderPaint)
         val cellSize = boardSize / 8f
         for (i in 1..7) {
