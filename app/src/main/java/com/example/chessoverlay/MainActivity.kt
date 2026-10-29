@@ -31,7 +31,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val btnStart = Button(this).apply {
-            text = "Bắt đầu Chess Overlay"
+            text = "Khởi chạy Chess Coach v2.0"
             textSize = 18f
             setOnClickListener { checkPermissionsAndStart() }
         }
@@ -68,7 +68,7 @@ class MainActivity : AppCompatActivity() {
             }
         } else if (requestCode == REQUEST_MEDIA_PROJECTION) {
             if (resultCode == Activity.RESULT_OK && data != null) {
-                Toast.makeText(this, "Đang mở cửa sổ nổi...", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Đang kích hoạt công cụ phân tích...", Toast.LENGTH_SHORT).show()
                 val serviceIntent = Intent(this, OverlayService::class.java).apply {
                     putExtra("RESULT_CODE", resultCode)
                     putExtra("DATA", data)
@@ -78,10 +78,9 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     startService(serviceIntent)
                 }
-                // Giữ app 1 giây để dịch vụ gắn cửa sổ nổi xong mới ẩn xuống nền (chống văng trên Android 14)
                 Handler(Looper.getMainLooper()).postDelayed({
                     moveTaskToBack(true)
-                }, 1000)
+                }, 800)
             }
         }
     }

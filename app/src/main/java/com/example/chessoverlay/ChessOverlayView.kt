@@ -9,7 +9,7 @@ import kotlin.math.sin
 
 class ChessOverlayView(context: Context) : View(context) {
 
-    var boardTopY = 550f
+    var boardTopY = 600f
     var boardSize = 1080f
     var isWhiteBottom = true
 
@@ -17,30 +17,30 @@ class ChessOverlayView(context: Context) : View(context) {
     private var toSquare: String? = null
 
     private val borderPaint = Paint().apply {
-        color = Color.argb(140, 0, 255, 0)
+        color = Color.argb(120, 0, 230, 118)
         style = Paint.Style.STROKE
-        strokeWidth = 6f
+        strokeWidth = 4f
     }
 
     private val highlightFromPaint = Paint().apply {
-        color = Color.argb(90, 255, 235, 59)
+        color = Color.argb(110, 255, 214, 0)
         style = Paint.Style.FILL
     }
 
     private val highlightToPaint = Paint().apply {
-        color = Color.argb(110, 76, 175, 80)
+        color = Color.argb(130, 0, 200, 83)
         style = Paint.Style.FILL
     }
 
     private val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(220, 0, 230, 118)
+        color = Color.argb(240, 0, 230, 118)
         style = Paint.Style.STROKE
-        strokeWidth = 18f
+        strokeWidth = 22f
         strokeCap = Paint.Cap.ROUND
     }
 
     private val arrowHeadPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(220, 0, 230, 118)
+        color = Color.argb(240, 0, 230, 118)
         style = Paint.Style.FILL
     }
 
@@ -99,8 +99,8 @@ class ChessOverlayView(context: Context) : View(context) {
         canvas.drawLine(startX, startY, endX, endY, arrowPaint)
 
         val angle = atan2((endY - startY).toDouble(), (endX - startX).toDouble())
-        val arrowLength = 45f
-        val arrowAngle = Math.toRadians(35.0)
+        val arrowLength = 50f
+        val arrowAngle = Math.toRadians(32.0)
 
         val x1 = endX - arrowLength * cos(angle - arrowAngle).toFloat()
         val y1 = endY - arrowLength * sin(angle - arrowAngle).toFloat()
