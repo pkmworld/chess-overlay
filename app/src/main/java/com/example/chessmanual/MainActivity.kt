@@ -24,7 +24,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val btnStart = Button(this).apply {
-            text = "BẬT CHESS MANUAL (ĐÃ VÁ LỖI)"
+            text = "BẬT CHESS TOUCH VISUAL v2.0"
             textSize = 16f
             setOnClickListener { checkOverlayPermission() }
         }

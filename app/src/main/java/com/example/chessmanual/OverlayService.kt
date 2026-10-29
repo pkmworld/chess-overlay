@@ -1,7 +1,9 @@
 package com.example.chessmanual
 
 import android.app.Service
+import android.content.Context
 import android.content.Intent
+import android.content.SharedPreferences
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.os.Handler
@@ -10,7 +12,6 @@ import android.os.Looper
 import android.view.Gravity
 import android.view.WindowManager
 import android.widget.Button
-import android.widget.EditText
 import android.widget.LinearLayout
 import android.widget.TextView
 import org.json.JSONObject
@@ -25,7 +26,7 @@ class OverlayService : Service() {
     private lateinit var chessOverlayView: ChessOverlayView
     private lateinit var controlLayout: LinearLayout
     private lateinit var tvStatus: TextView
-    private lateinit var edtMove: EditText
+    private lateinit var prefs: SharedPreferences
 
     private var screenWidth = 1080
     private var screenHeight = 2400
@@ -38,6 +39,7 @@ class OverlayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        prefs = getSharedPreferences("ChessVisualTouchPrefs", Context.MODE_PRIVATE)
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         val metrics = android.util.DisplayMetrics()
         @Suppress("DEPRECATION")
@@ -51,10 +53,12 @@ class OverlayService : Service() {
 
     private fun setupBoardOverlay() {
         try {
+            val savedTopY = prefs.getFloat("BOARD_TOP_Y", (screenHeight - screenWidth) * 0.5f)
             chessOverlayView = ChessOverlayView(this).apply {
-                boardTopY = (screenHeight - screenWidth) * 0.5f
+                boardTopY = savedTopY
             }
-            // VÁ LỖI CẢM ỨNG 1: Đặt FLAG_NOT_TOUCHABLE để màn hình vẽ mũi tên không cản tay người chơi
+            
+            // Khởi tạo mặc định: Trạng thái xuyên cảm ứng để chơi game (FLAG_NOT_TOUCHABLE)
             val params = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.MATCH_PARENT,
@@ -65,10 +69,20 @@ class OverlayService : Service() {
                 PixelFormat.TRANSLUCENT
             )
             windowManager.addView(chessOverlayView, params)
+
+            chessOverlayView.onMoveInputListener = { moveStr ->
+                moveHistory.add(moveStr)
+                getEngineMove(moveHistory.joinToString(" "))
+                
+                // Sau khi chạm 2 nhịp xong, tự động TẮT chế độ chạm để trả cảm ứng cho game
+                toggleInputMode(false)
+            }
         } catch (e: Exception) {
             e.printStackTrace()
         }
     }
+
+    private lateinit var btnToggleInput: Button
 
     private fun setupFloatingControls() {
         try {
@@ -79,39 +93,26 @@ class OverlayService : Service() {
             }
 
             tvStatus = TextView(this).apply {
-                text = "Gõ nước đi (Ví dụ: e2e4) -> Bấm Gợi ý"
+                text = "Căn khung xanh cho khớp mép bàn cờ ->"
                 setTextColor(Color.parseColor("#69F0AE"))
                 textSize = 12f
             }
 
-            val rowInput = LinearLayout(this).apply {
+            val rowButtons1 = LinearLayout(this).apply {
                 orientation = LinearLayout.HORIZONTAL
             }
 
-            edtMove = EditText(this).apply {
-                hint = "e7e5"
-                textSize = 14f
-                setTextColor(Color.WHITE)
-                setHintTextColor(Color.GRAY)
-                minWidth = 200
-                setPadding(10, 5, 10, 5)
-            }
-
-            val btnSubmit = Button(this).apply {
-                text = "Gợi ý"
+            btnToggleInput = Button(this).apply {
+                text = "👆 NHẬP NƯỚC ĐI"
                 textSize = 11f
                 setOnClickListener {
-                    val text = edtMove.text.toString().trim().lowercase()
-                    if (text.length >= 4) {
-                        moveHistory.add(text)
-                        getEngineMove(moveHistory.joinToString(" "))
-                        edtMove.setText("")
-                    }
+                    val isCurrentlyInputting = chessOverlayView.isInputMode
+                    toggleInputMode(!isCurrentlyInputting)
                 }
             }
 
             val btnUndo = Button(this).apply {
-                text = "Xóa"
+                text = "Lùi lại"
                 textSize = 11f
                 setOnClickListener {
                     if (moveHistory.isNotEmpty()) {
@@ -131,12 +132,13 @@ class OverlayService : Service() {
                     tvStatus.text = if (chessOverlayView.isWhiteBottom) "Góc nhìn: Phe Trắng" else "Góc nhìn: Phe Đen"
                 }
             }
-
+            
             val btnUp = Button(this).apply {
                 text = "▲"
                 textSize = 11f
                 setOnClickListener { 
                     chessOverlayView.boardTopY -= 15f
+                    prefs.edit().putFloat("BOARD_TOP_Y", chessOverlayView.boardTopY).apply()
                     chessOverlayView.invalidate()
                 }
             }
@@ -146,6 +148,7 @@ class OverlayService : Service() {
                 textSize = 11f
                 setOnClickListener { 
                     chessOverlayView.boardTopY += 15f
+                    prefs.edit().putFloat("BOARD_TOP_Y", chessOverlayView.boardTopY).apply()
                     chessOverlayView.invalidate()
                 }
             }
@@ -156,24 +159,21 @@ class OverlayService : Service() {
                 setOnClickListener { stopSelf() }
             }
 
-            rowInput.addView(edtMove)
-            rowInput.addView(btnSubmit)
-            rowInput.addView(btnUndo)
-            rowInput.addView(btnFlip)
-            rowInput.addView(btnUp)
-            rowInput.addView(btnDown)
-            rowInput.addView(btnClose)
+            rowButtons1.addView(btnToggleInput)
+            rowButtons1.addView(btnUndo)
+            rowButtons1.addView(btnFlip)
+            rowButtons1.addView(btnUp)
+            rowButtons1.addView(btnDown)
+            rowButtons1.addView(btnClose)
 
             controlLayout.addView(tvStatus)
-            controlLayout.addView(rowInput)
+            controlLayout.addView(rowButtons1)
 
-            // VÁ LỖI CẢM ỨNG 2: Đặt FLAG_NOT_TOUCH_MODAL để vừa gõ được phím, vừa chạm được ra ngoài
             val params = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or 
-                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE,
                 PixelFormat.TRANSLUCENT
             ).apply {
                 gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
@@ -186,11 +186,32 @@ class OverlayService : Service() {
         }
     }
 
+    // Hàm thay đổi trạng thái cảm ứng của màng kính Overlay
+    private fun toggleInputMode(enable: Boolean) {
+        chessOverlayView.isInputMode = enable
+        if (!enable) chessOverlayView.tapFromSquare = null // Xóa ô vuông đỏ nếu hủy giữa chừng
+        
+        chessOverlayView.invalidate() // Kích hoạt đổi màu khung viền
+
+        val params = chessOverlayView.layoutParams as WindowManager.LayoutParams
+        if (enable) {
+            // Khi bật, bỏ cờ NOT_TOUCHABLE đi để hứng cảm ứng ngón tay
+            params.flags = params.flags and WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE.inv()
+            tvStatus.text = "🔴 CHẠM 2 NHỊP: Ô quân địch vừa đứng -> Ô vừa tới"
+            btnToggleInput.text = "✖ HỦY NHẬP"
+        } else {
+            // Khi tắt, gắn lại cờ NOT_TOUCHABLE để thả cảm ứng rơi xuống game
+            params.flags = params.flags or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE
+            tvStatus.text = "Sẵn sàng | Đã mở khóa chạm cho game"
+            btnToggleInput.text = "👆 NHẬP NƯỚC ĐI"
+        }
+        windowManager.updateViewLayout(chessOverlayView, params)
+    }
+
     private fun getEngineMove(movesStr: String) {
         tvStatus.text = "Stockfish đang tính..."
         workerExecutor.execute {
             try {
-                // VÁ LỖI API: Tự động nối danh sách nước đi vào FEN khởi tạo chuẩn của UCI
                 val baseFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
                 val query = if (movesStr.isEmpty()) baseFen else "$baseFen moves ${movesStr.trim()}"
                 val encodedFen = URLEncoder.encode(query, "UTF-8")
@@ -215,19 +236,19 @@ class OverlayService : Service() {
                         mainHandler.post {
                             if (bestMove != null) {
                                 chessOverlayView.setMove(bestMove)
-                                tvStatus.text = "Gợi ý Stockfish: ${bestMove.substring(0, 2)} ➔ ${bestMove.substring(2, 4)}"
+                                tvStatus.text = "Đi: ${bestMove.substring(0, 2)} ➔ ${bestMove.substring(2, 4)} | (Đã mở khóa cảm ứng game)"
                             } else {
                                 tvStatus.text = "Hết nước đi hợp lệ"
                             }
                         }
                     } else {
-                        mainHandler.post { tvStatus.text = "Lỗi định dạng nước đi" }
+                        mainHandler.post { tvStatus.text = "Lỗi tính toán, thử lùi lại (Undo)" }
                     }
                 } else {
-                    mainHandler.post { tvStatus.text = "Lỗi kết nối Stockfish" }
+                    mainHandler.post { tvStatus.text = "Lỗi kết nối API" }
                 }
             } catch (e: Exception) {
-                mainHandler.post { tvStatus.text = "Lỗi mạng: ${e.message}" }
+                mainHandler.post { tvStatus.text = "Lỗi: ${e.message}" }
             }
         }
     }

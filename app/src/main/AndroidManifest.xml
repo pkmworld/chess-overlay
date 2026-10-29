@@ -7,7 +7,7 @@
 
     <application
         android:allowBackup="true"
-        android:label="Chess Manual Coach"
+        android:label="Chess Visual Touch"
         android:supportsRtl="true"
         android:theme="@style/Theme.AppCompat.Light.NoActionBar">
 

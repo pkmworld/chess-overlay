@@ -2,6 +2,7 @@ package com.example.chessmanual
 
 import android.content.Context
 import android.graphics.*
+import android.view.MotionEvent
 import android.view.View
 import kotlin.math.atan2
 import kotlin.math.cos
@@ -13,8 +14,24 @@ class ChessOverlayView(context: Context) : View(context) {
     var boardSize = 1080f
     var isWhiteBottom = true
 
+    var isInputMode = false
+    var tapFromSquare: String? = null
+    var onMoveInputListener: ((String) -> Unit)? = null
+
     private var fromSquare: String? = null
     private var toSquare: String? = null
+
+    private val borderPaint = Paint().apply {
+        color = Color.argb(150, 0, 230, 118)
+        style = Paint.Style.STROKE
+        strokeWidth = 6f
+    }
+
+    private val inputModePaint = Paint().apply {
+        color = Color.argb(180, 255, 82, 82)
+        style = Paint.Style.STROKE
+        strokeWidth = 10f
+    }
 
     private val highlightFromPaint = Paint().apply {
         color = Color.argb(120, 255, 214, 0)
@@ -23,6 +40,11 @@ class ChessOverlayView(context: Context) : View(context) {
 
     private val highlightToPaint = Paint().apply {
         color = Color.argb(140, 0, 200, 83)
+        style = Paint.Style.FILL
+    }
+    
+    private val tapHighlightPaint = Paint().apply {
+        color = Color.argb(150, 255, 82, 82)
         style = Paint.Style.FILL
     }
 
@@ -49,9 +71,57 @@ class ChessOverlayView(context: Context) : View(context) {
         invalidate()
     }
 
+    override fun onTouchEvent(event: MotionEvent): Boolean {
+        if (!isInputMode) return false // Nếu đang tắt chế độ chạm, thả tay xuyên qua chơi game
+        
+        if (event.action == MotionEvent.ACTION_DOWN) {
+            val x = event.x
+            val y = event.y
+            
+            if (y >= boardTopY && y <= boardTopY + boardSize) {
+                val col = (x / (boardSize / 8)).toInt().coerceIn(0, 7)
+                val row = ((y - boardTopY) / (boardSize / 8)).toInt().coerceIn(0, 7)
+
+                val fileChar = (if (isWhiteBottom) 'a' + col else 'a' + (7 - col)).toChar()
+                val rankChar = (if (isWhiteBottom) '1' + (7 - row) else '1' + row).toChar()
+                val square = "$fileChar$rankChar"
+
+                if (tapFromSquare == null) {
+                    tapFromSquare = square
+                    invalidate() // Vẽ ô vuông đỏ báo hiệu đã chọn ô bắt đầu
+                } else {
+                    val move = "$tapFromSquare$square"
+                    tapFromSquare = null
+                    onMoveInputListener?.invoke(move)
+                }
+                return true
+            }
+        }
+        return super.onTouchEvent(event)
+    }
+
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         boardSize = width.toFloat()
+
+        // Vẽ khung (Đỏ nếu đang bật chế độ nhận chạm, Xanh nếu đang thả tay)
+        if (isInputMode) {
+            canvas.drawRect(0f, boardTopY, boardSize, boardTopY + boardSize, inputModePaint)
+        } else {
+            canvas.drawRect(0f, boardTopY, boardSize, boardTopY + boardSize, borderPaint)
+        }
+
+        // Vẽ ô vừa được chạm vào (Ô bắt đầu)
+        val tFrom = tapFromSquare
+        if (tFrom != null) {
+            val center = getSquareCenter(tFrom)
+            val cellSize = boardSize / 8f
+            canvas.drawRect(
+                center.x - cellSize / 2, center.y - cellSize / 2,
+                center.x + cellSize / 2, center.y + cellSize / 2,
+                tapHighlightPaint
+            )
+        }
 
         val fSq = fromSquare ?: return
         val tSq = toSquare ?: return
