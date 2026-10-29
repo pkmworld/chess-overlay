@@ -24,7 +24,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val btnStart = Button(this).apply {
-            text = "BẬT KHUNG NHẬP TAY CHESS COACH"
+            text = "BẬT CHESS MANUAL (ĐÃ VÁ LỖI)"
             textSize = 16f
             setOnClickListener { checkOverlayPermission() }
         }
@@ -45,13 +45,14 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
+    @Deprecated("Deprecated in Java")
     override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
         super.onActivityResult(requestCode, resultCode, data)
         if (requestCode == REQUEST_OVERLAY) {
             if (Settings.canDrawOverlays(this)) {
                 startOverlayService()
             } else {
-                Toast.makeText(this, "Cần cấp quyền vẽ đè để hiển thị bảng!", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Cần quyền vẽ đè để dùng app!", Toast.LENGTH_SHORT).show()
             }
         }
     }
@@ -59,7 +60,7 @@ class MainActivity : AppCompatActivity() {
     private fun startOverlayService() {
         val intent = Intent(this, OverlayService::class.java)
         startService(intent)
-        Toast.makeText(this, "Đã mở bảng điều khiển nổi!", Toast.LENGTH_SHORT).show()
+        Toast.makeText(this, "Công cụ đã nổi lên màn hình!", Toast.LENGTH_SHORT).show()
         moveTaskToBack(true)
     }
 }

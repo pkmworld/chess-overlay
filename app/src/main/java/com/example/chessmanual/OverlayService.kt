@@ -32,8 +32,6 @@ class OverlayService : Service() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val workerExecutor = Executors.newSingleThreadExecutor()
-    
-    // Lưu lịch sử các nước đi để tạo FEN đơn giản hoặc gọi trực tiếp API
     private val moveHistory = mutableListOf<String>()
 
     override fun onBind(intent: Intent?): IBinder? = null
@@ -56,6 +54,7 @@ class OverlayService : Service() {
             chessOverlayView = ChessOverlayView(this).apply {
                 boardTopY = (screenHeight - screenWidth) * 0.5f
             }
+            // VÁ LỖI CẢM ỨNG 1: Đặt FLAG_NOT_TOUCHABLE để màn hình vẽ mũi tên không cản tay người chơi
             val params = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.MATCH_PARENT,
                 WindowManager.LayoutParams.MATCH_PARENT,
@@ -80,7 +79,7 @@ class OverlayService : Service() {
             }
 
             tvStatus = TextView(this).apply {
-                text = "Nhập nước đối thủ (VD: e7e5) rồi bấm Gợi ý"
+                text = "Gõ nước đi (Ví dụ: e2e4) -> Bấm Gợi ý"
                 setTextColor(Color.parseColor("#69F0AE"))
                 textSize = 12f
             }
@@ -90,7 +89,7 @@ class OverlayService : Service() {
             }
 
             edtMove = EditText(this).apply {
-                hint = "e.g. e7e5"
+                hint = "e7e5"
                 textSize = 14f
                 setTextColor(Color.WHITE)
                 setHintTextColor(Color.GRAY)
@@ -112,24 +111,42 @@ class OverlayService : Service() {
             }
 
             val btnUndo = Button(this).apply {
-                text = "Undo"
+                text = "Xóa"
                 textSize = 11f
                 setOnClickListener {
                     if (moveHistory.isNotEmpty()) {
                         moveHistory.removeAt(moveHistory.size - 1)
-                        tvStatus.text = "Đã xóa nước cuối. Lịch sử: ${moveHistory.size} nước"
+                        tvStatus.text = "Lịch sử còn: ${moveHistory.size} nước"
                         chessOverlayView.setMove(null)
                     }
                 }
             }
 
             val btnFlip = Button(this).apply {
-                text = "Đổi phe"
+                text = "Phe"
                 textSize = 11f
                 setOnClickListener {
                     chessOverlayView.isWhiteBottom = !chessOverlayView.isWhiteBottom
                     chessOverlayView.invalidate()
-                    tvStatus.text = if (chessOverlayView.isWhiteBottom) "Đang nhìn từ phía Trắng" else "Đang nhìn từ phía Đen"
+                    tvStatus.text = if (chessOverlayView.isWhiteBottom) "Góc nhìn: Phe Trắng" else "Góc nhìn: Phe Đen"
+                }
+            }
+
+            val btnUp = Button(this).apply {
+                text = "▲"
+                textSize = 11f
+                setOnClickListener { 
+                    chessOverlayView.boardTopY -= 15f
+                    chessOverlayView.invalidate()
+                }
+            }
+            
+            val btnDown = Button(this).apply {
+                text = "▼"
+                textSize = 11f
+                setOnClickListener { 
+                    chessOverlayView.boardTopY += 15f
+                    chessOverlayView.invalidate()
                 }
             }
 
@@ -143,16 +160,20 @@ class OverlayService : Service() {
             rowInput.addView(btnSubmit)
             rowInput.addView(btnUndo)
             rowInput.addView(btnFlip)
+            rowInput.addView(btnUp)
+            rowInput.addView(btnDown)
             rowInput.addView(btnClose)
 
             controlLayout.addView(tvStatus)
             controlLayout.addView(rowInput)
 
+            // VÁ LỖI CẢM ỨNG 2: Đặt FLAG_NOT_TOUCH_MODAL để vừa gõ được phím, vừa chạm được ra ngoài
             val params = WindowManager.LayoutParams(
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.WRAP_CONTENT,
                 WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-                WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+                WindowManager.LayoutParams.FLAG_NOT_TOUCH_MODAL or 
+                        WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
                 PixelFormat.TRANSLUCENT
             ).apply {
                 gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
@@ -169,47 +190,44 @@ class OverlayService : Service() {
         tvStatus.text = "Stockfish đang tính..."
         workerExecutor.execute {
             try {
-                // Sử dụng api tính toán dựa trên danh sách các nước đi (UCI moves)
-                val encodedMoves = URLEncoder.encode(movesStr, "UTF-8")
-                val url = URL("https://chess-api.com/v1")
+                // VÁ LỖI API: Tự động nối danh sách nước đi vào FEN khởi tạo chuẩn của UCI
+                val baseFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
+                val query = if (movesStr.isEmpty()) baseFen else "$baseFen moves ${movesStr.trim()}"
+                val encodedFen = URLEncoder.encode(query, "UTF-8")
+                
+                val url = URL("https://stockfish.online/api/s/v2.php?fen=$encodedFen&depth=12")
                 val conn = (url.openConnection() as HttpURLConnection).apply {
-                    requestMethod = "POST"
-                    connectTimeout = 5000
-                    readTimeout = 5000
-                    setRequestProperty("Content-Type", "application/json")
-                    doOutput = true
-                }
-                
-                val jsonBody = JSONObject().apply {
-                    put("fen", "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1")
-                    put("moves", movesStr)
-                    put("depth", 12)
-                }
-                
-                conn.outputStream.use { os ->
-                    os.write(jsonBody.toString().toByteArray(Charsets.UTF_8))
+                    requestMethod = "GET"
+                    connectTimeout = 6000
+                    readTimeout = 6000
+                    setRequestProperty("User-Agent", "Mozilla/5.0")
                 }
 
                 if (conn.responseCode == 200) {
                     val resp = conn.inputStream.bufferedReader().readText()
                     val json = JSONObject(resp)
-                    val from = json.optString("from", "")
-                    val to = json.optString("to", "")
-                    val bestMove = if (from.length == 2 && to.length == 2) "$from$to" else null
+                    if (json.optBoolean("success", false)) {
+                        val raw = json.optString("bestmove", "").ifEmpty { json.optString("data", "") }
+                        val parts = raw.trim().split(" ")
+                        val candidate = if (parts.size >= 2) parts[1] else parts[0]
+                        val bestMove = if (candidate.length >= 4 && candidate != "(none)") candidate.substring(0, 4) else null
 
-                    mainHandler.post {
-                        if (bestMove != null) {
-                            chessOverlayView.setMove(bestMove)
-                            tvStatus.text = "Nên đi: ${bestMove.substring(0, 2)} ➔ ${bestMove.substring(2, 4)}"
-                        } else {
-                            tvStatus.text = "Không tìm thấy nước đi phù hợp"
+                        mainHandler.post {
+                            if (bestMove != null) {
+                                chessOverlayView.setMove(bestMove)
+                                tvStatus.text = "Gợi ý Stockfish: ${bestMove.substring(0, 2)} ➔ ${bestMove.substring(2, 4)}"
+                            } else {
+                                tvStatus.text = "Hết nước đi hợp lệ"
+                            }
                         }
+                    } else {
+                        mainHandler.post { tvStatus.text = "Lỗi định dạng nước đi" }
                     }
                 } else {
-                    mainHandler.post { tvStatus.text = "Lỗi kết nối API" }
+                    mainHandler.post { tvStatus.text = "Lỗi kết nối Stockfish" }
                 }
             } catch (e: Exception) {
-                mainHandler.post { tvStatus.text = "Lỗi: ${e.message}" }
+                mainHandler.post { tvStatus.text = "Lỗi mạng: ${e.message}" }
             }
         }
     }

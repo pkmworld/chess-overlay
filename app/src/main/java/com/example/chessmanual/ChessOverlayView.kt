@@ -16,12 +16,6 @@ class ChessOverlayView(context: Context) : View(context) {
     private var fromSquare: String? = null
     private var toSquare: String? = null
 
-    private val borderPaint = Paint().apply {
-        color = Color.argb(160, 0, 230, 118)
-        style = Paint.Style.STROKE
-        strokeWidth = 6f
-    }
-
     private val highlightFromPaint = Paint().apply {
         color = Color.argb(120, 255, 214, 0)
         style = Paint.Style.FILL
@@ -58,8 +52,6 @@ class ChessOverlayView(context: Context) : View(context) {
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
         boardSize = width.toFloat()
-
-        canvas.drawRect(0f, boardTopY, boardSize, boardTopY + boardSize, borderPaint)
 
         val fSq = fromSquare ?: return
         val tSq = toSquare ?: return
