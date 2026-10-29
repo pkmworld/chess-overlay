@@ -17,30 +17,30 @@ class ChessOverlayView(context: Context) : View(context) {
     private var toSquare: String? = null
 
     private val borderPaint = Paint().apply {
-        color = Color.argb(120, 0, 230, 118)
+        color = Color.argb(150, 0, 230, 118)
         style = Paint.Style.STROKE
-        strokeWidth = 4f
+        strokeWidth = 5f
     }
 
     private val highlightFromPaint = Paint().apply {
-        color = Color.argb(110, 255, 214, 0)
+        color = Color.argb(115, 255, 214, 0)
         style = Paint.Style.FILL
     }
 
     private val highlightToPaint = Paint().apply {
-        color = Color.argb(130, 0, 200, 83)
+        color = Color.argb(135, 0, 200, 83)
         style = Paint.Style.FILL
     }
 
     private val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(240, 0, 230, 118)
+        color = Color.argb(245, 0, 230, 118)
         style = Paint.Style.STROKE
         strokeWidth = 22f
         strokeCap = Paint.Cap.ROUND
     }
 
     private val arrowHeadPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(240, 0, 230, 118)
+        color = Color.argb(245, 0, 230, 118)
         style = Paint.Style.FILL
     }
 
@@ -83,8 +83,8 @@ class ChessOverlayView(context: Context) : View(context) {
     }
 
     private fun getSquareCenter(square: String): PointF {
-        val file = square[0] - 'a'
-        val rank = square[1] - '1'
+        val file = (square[0] - 'a').coerceIn(0, 7)
+        val rank = (square[1] - '1').coerceIn(0, 7)
 
         val col = if (isWhiteBottom) file else 7 - file
         val row = if (isWhiteBottom) 7 - rank else rank

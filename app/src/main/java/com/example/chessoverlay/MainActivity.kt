@@ -31,7 +31,7 @@ class MainActivity : AppCompatActivity() {
         }
 
         val btnStart = Button(this).apply {
-            text = "Khởi chạy Chess Coach v2.0"
+            text = "KHỞI CHẠY CHESS COACH v3.3"
             textSize = 18f
             setOnClickListener { checkPermissionsAndStart() }
         }
@@ -68,7 +68,7 @@ class MainActivity : AppCompatActivity() {
             }
         } else if (requestCode == REQUEST_MEDIA_PROJECTION) {
             if (resultCode == Activity.RESULT_OK && data != null) {
-                Toast.makeText(this, "Đang kích hoạt công cụ phân tích...", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Đang kích hoạt Stockfish 16...", Toast.LENGTH_SHORT).show()
                 val serviceIntent = Intent(this, OverlayService::class.java).apply {
                     putExtra("RESULT_CODE", resultCode)
                     putExtra("DATA", data)
