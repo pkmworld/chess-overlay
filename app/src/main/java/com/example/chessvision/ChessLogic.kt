@@ -15,11 +15,6 @@ class Move(val fr: Int, val fc: Int, val tr: Int, val tc: Int, val promo: Char =
 class Position(val b: Array<CharArray>, val whiteToMove: Boolean, val castle: String, val ep: String) {
     fun fen(): String =
         Chess.fenBoard(b) + " " + (if (whiteToMove) "w" else "b") + " " + castle + " " + ep + " 0 1"
-
-    fun sameBoard(o: Array<CharArray>): Boolean {
-        for (r in 0..7) for (c in 0..7) if (b[r][c] != o[r][c]) return false
-        return true
-    }
 }
 
 object Chess {

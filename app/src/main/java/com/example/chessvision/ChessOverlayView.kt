@@ -68,7 +68,6 @@ class ChessOverlayView(context: Context) : View(context) {
         val size = board.width()
         val cellSize = size / 8f
 
-        // Chỉ vẽ 4 dấu ngoặc ở 4 góc để biết bàn cờ đã bắt chuẩn
         if (showCornerMarkers) {
             val len = 36f
             canvas.drawLine(0f, 0f, len, 0f, cornerPaint)

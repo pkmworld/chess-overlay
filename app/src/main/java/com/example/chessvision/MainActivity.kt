@@ -15,6 +15,8 @@ import android.provider.Settings
 import android.view.Gravity
 import android.widget.Button
 import android.widget.LinearLayout
+import android.widget.RadioButton
+import android.widget.RadioGroup
 import android.widget.TextView
 import android.widget.Toast
 import androidx.appcompat.app.AppCompatActivity
@@ -25,22 +27,35 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        val prefs = getSharedPreferences("StealthChessPrefs", Context.MODE_PRIVATE)
         val layout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             gravity = Gravity.CENTER
             setPadding(64, 64, 64, 64)
         }
         val tvHint = TextView(this).apply {
-            text = "1) Mở ván mới ở thế khởi đầu\n2) Bấm KHỞI CHẠY, cấp quyền\n3) Trên bảng nổi bấm 📚 Học (lần đầu hoặc khi đổi bộ quân)\n4) Bấm ⚡ Quét hoặc ▶ Auto"
+            text = "Chọn phe của bạn (phe đang nằm ở phía DƯỚI bàn cờ), mở ván cờ, rồi bấm KHỞI CHẠY.\nDùng được ở bất kỳ thế cờ nào, kể cả đã đi giữa ván."
             textSize = 14f
-            setPadding(0, 0, 0, 48)
+            setPadding(0, 0, 0, 32)
+        }
+        val rbWhite = RadioButton(this).apply { text = "⚪ Tôi cầm Trắng (Trắng ở dưới)"; id = 1 }
+        val rbBlack = RadioButton(this).apply { text = "⚫ Tôi cầm Đen (Đen ở dưới)"; id = 2 }
+        val group = RadioGroup(this).apply {
+            orientation = RadioGroup.VERTICAL
+            addView(rbWhite); addView(rbBlack)
+            check(if (prefs.getBoolean("WHITE_BOTTOM", true)) 1 else 2)
+            setOnCheckedChangeListener { _, checked ->
+                prefs.edit().putBoolean("WHITE_BOTTOM", checked == 1).apply()
+            }
+            setPadding(0, 0, 0, 32)
         }
         val btnStart = Button(this).apply {
-            text = "KHỞI CHẠY CHESS VISION v6.0"
+            text = "KHỞI CHẠY CHESS VISION v6.1"
             textSize = 18f
             setOnClickListener { checkPermissionsAndStart() }
         }
         layout.addView(tvHint)
+        layout.addView(group)
         layout.addView(btnStart)
         setContentView(layout)
     }
@@ -72,7 +87,7 @@ class MainActivity : AppCompatActivity() {
             else Toast.makeText(this, "Cần cấp quyền hiển thị trên ứng dụng khác", Toast.LENGTH_LONG).show()
         } else if (requestCode == REQUEST_MEDIA_PROJECTION) {
             if (resultCode == Activity.RESULT_OK && data != null) {
-                Toast.makeText(this, "Đã bật Chess Vision v6.0...", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Đã bật Chess Vision v6.1...", Toast.LENGTH_SHORT).show()
                 val serviceIntent = Intent(this, OverlayService::class.java).apply {
                     putExtra("RESULT_CODE", resultCode)
                     putExtra("DATA", data)

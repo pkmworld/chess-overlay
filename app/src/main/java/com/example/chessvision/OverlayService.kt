@@ -44,20 +44,29 @@ class PixelSource(private val buf: ByteBuffer, private val rowStride: Int, priva
     }
 }
 
-class CellData(val mask: BooleanArray, val occupied: Boolean, val coreLum: Int)
+/** Đặc trưng của một ô cờ (ảnh 32x32). */
+class CellFeature(
+    val occupied: Boolean,
+    val edges: BooleanArray,
+    val coreMedianLum: Int,
+    val edgeCount: Int,
+    val topZoneWidth: Int,
+    val midZoneWidth: Int,
+    val highestEdgeY: Int,
+    val symmetryDiff: Int
+)
 
 class OverlayService : Service() {
 
     companion object {
         private const val TAG = "ChessVision"
-        private const val GRID = 16                  // mỗi ô lấy mẫu 16x16
-        private const val DEV_THRESHOLD = 64         // ngưỡng lệch màu so với nền ô
-        private const val OCCUPIED_COVERAGE = 0.35f  // tỉ lệ điểm lệch ở vùng giữa ô để coi là có quân
-        private const val MATCH_MAX_DIFF = 70        // sai khác tối đa (trên 256) khi so template
+        private const val CW = 32                    // ô được thu về 32x32
+        private const val EDGE_GRAD = 26             // ngưỡng gradient để coi là cạnh
+        private const val OCC_EDGE_MIN = 22          // số điểm cạnh tối thiểu để coi ô có quân
+        private const val TEMPLATE_MAX_DIFF = 175    // sai khác tối đa (trên 1024) khi so khớp mẫu đã học
         private const val ENGINE_TIME_MS = 2500L
-        private const val AUTO_INTERVAL_MS = 1500L
+        private const val AUTO_INTERVAL_MS = 1000L
         private const val PREF_TOP_Y = "SAVED_TOP_Y"
-        private const val TEMPLATE_CHARS = "KQRBNPkqrbnp"
         private val START_ROWS = arrayOf(
             "rnbqkbnr", "pppppppp", "11111111", "11111111",
             "11111111", "11111111", "PPPPPPPP", "RNBQKBNR"
@@ -93,18 +102,16 @@ class OverlayService : Service() {
     @Volatile private var destroyed = false
     @Volatile private var isAutoMode = false
     @Volatile private var cachedBoardTopY = -1
-    @Volatile private var whiteBottom = true
-    @Volatile private var learnRequested = false
+    @Volatile private var whiteBottom = true   // phe của bạn = phe đang ở phía dưới bàn cờ
     @Volatile private var lumThr = 128
 
     // ---- Chỉ đọc/ghi trên worker thread ----
-    private val templates = HashMap<Char, ArrayList<BooleanArray>>()
-    private var pos: Position? = null
-    private var turnAssumed = false
+    private val learnedShapes = HashMap<Char, BooleanArray>()  // tự học khi tình cờ thấy thế khởi đầu (không bắt buộc)
+    private var castleMem = "KQkq"
+    private var epSquare = "-"
+    private var prevStd: Array<CharArray>? = null
     private var pendingKey = ""
     private var confirmedKey = ""
-    private var unexplainedKey = ""
-    private var unexplainedCount = 0
     private var lastSuggestedFen = ""
     private val fenCache = HashMap<String, String>()
     private var failCount = 0
@@ -124,7 +131,7 @@ class OverlayService : Service() {
         super.onCreate()
         prefs = getSharedPreferences("StealthChessPrefs", Context.MODE_PRIVATE)
         cachedBoardTopY = prefs.getInt(PREF_TOP_Y, -1)
-        loadTemplates()
+        whiteBottom = prefs.getBoolean("WHITE_BOTTOM", true)
 
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         val size = readScreenSize()
@@ -204,16 +211,14 @@ class OverlayService : Service() {
             setPadding(14, 8, 14, 8)
         }
         tvStatus = TextView(this).apply {
-            text = if (templatesReady()) "Sẵn sàng • bấm ⚡ để quét"
-            else "Chưa học quân: mở ván mới (thế khởi đầu) rồi bấm 📚"
+            text = "Chess Vision v6.1 • chọn phe rồi bấm ⚡ hoặc ▶ Auto"
             setTextColor(Color.parseColor("#69F0AE"))
             textSize = 11f
             maxWidth = (screenWidth * 0.9f).toInt()
             maxLines = 3
         }
 
-        val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, 4, 0, 0) }
-        val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, 2, 0, 0) }
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, 4, 0, 0) }
 
         btnSide = createButton(if (whiteBottom) "⚪ Trắng" else "⚫ Đen") {
             whiteBottom = !whiteBottom
@@ -239,18 +244,10 @@ class OverlayService : Service() {
 
         val btnScan = createButton("⚡ Quét") { scanAndSuggest(true) }
 
-        val btnTurn = createButton("🔁 Lượt") {
-            runOnWorker {
-                pos?.let { pos = Position(it.b, !it.whiteToMove, it.castle, "-") }
-                turnAssumed = false
-                lastSuggestedFen = ""
-            }
-            scanAndSuggest(true)
-        }
-
-        val btnLearn = createButton("📚 Học") {
-            learnRequested = true
-            tvStatus.text = "Đang học bộ quân từ thế khởi đầu..."
+        // Reset trí nhớ ván (quyền nhập thành, mẫu quân đã học) — dùng khi bắt đầu ván mới / đổi bộ quân
+        val btnRelearn = createButton("♻") {
+            runOnWorker { learnedShapes.clear(); resetGameState() }
+            tvStatus.text = "Đã reset trí nhớ ván • quét lại..."
             scanAndSuggest(true)
         }
 
@@ -260,17 +257,15 @@ class OverlayService : Service() {
         val btnReset = createButton("⟲") {
             cachedBoardTopY = -1
             prefs.edit().remove(PREF_TOP_Y).apply()
-            runOnWorker { resetGameState() }
             tvStatus.text = "Đang dò lại vị trí bàn cờ..."
             scanAndSuggest(true)
         }
 
         val btnClose = createButton("✕") { stopSelf() }
 
-        row1.addView(btnSide); row1.addView(btnAuto); row1.addView(btnScan); row1.addView(btnTurn)
-        row2.addView(btnLearn); row2.addView(btnUp); row2.addView(btnDown)
-        row2.addView(btnReset); row2.addView(btnClose)
-        controlLayout.addView(tvStatus); controlLayout.addView(row1); controlLayout.addView(row2)
+        row.addView(btnSide); row.addView(btnAuto); row.addView(btnScan); row.addView(btnRelearn)
+        row.addView(btnUp); row.addView(btnDown); row.addView(btnReset); row.addView(btnClose)
+        controlLayout.addView(tvStatus); controlLayout.addView(row)
 
         controlParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
@@ -463,136 +458,170 @@ class OverlayService : Service() {
 
     // ------------------------------------------------------- Đọc bàn cờ từ ảnh
 
-    /** Màu nền ô: trung vị 4 mảng ở mép ô (chịu được ô tô sáng nước vừa đi và chữ tọa độ). */
-    private fun estimateBackground(px: IntArray, n: Int, x0: Float, y0: Float, cs: Float): IntArray {
-        val spots = arrayOf(
-            floatArrayOf(0.04f, 0.04f), floatArrayOf(0.88f, 0.04f),
-            floatArrayOf(0.03f, 0.45f), floatArrayOf(0.89f, 0.45f)
-        )
-        val rs = IntArray(4); val gs = IntArray(4); val bs = IntArray(4)
-        for ((k, s) in spots.withIndex()) {
-            var sr = 0; var sg = 0; var sb = 0
-            for (j in 0 until 4) for (i in 0 until 4) {
-                val x = (x0 + (s[0] + i * 0.02f) * cs).toInt().coerceIn(0, n - 1)
-                val y = (y0 + (s[1] + j * 0.02f) * cs).toInt().coerceIn(0, n - 1)
-                val p = px[y * n + x]
-                sr += Color.red(p); sg += Color.green(p); sb += Color.blue(p)
+    /** Phân tích 1 ô: thu về 32x32 xám, tìm cạnh, đo hình dạng (như code cũ). */
+    private fun analyzeCell(px: IntArray, n: Int, x0: Float, y0: Float, cs: Float): CellFeature {
+        val w = CW; val h = CW
+        val gray = IntArray(w * h)
+        for (j in 0 until h) for (i in 0 until w) {
+            var s = 0
+            for (dj in 0..1) for (di in 0..1) {
+                val x = (x0 + (i + 0.25f + 0.5f * di) * cs / w).toInt().coerceIn(0, n - 1)
+                val y = (y0 + (j + 0.25f + 0.5f * dj) * cs / h).toInt().coerceIn(0, n - 1)
+                s += lum(px[y * n + x])
             }
-            rs[k] = sr / 16; gs[k] = sg / 16; bs[k] = sb / 16
+            gray[j * w + i] = s / 4
         }
-        rs.sort(); gs.sort(); bs.sort()
-        return intArrayOf((rs[1] + rs[2]) / 2, (gs[1] + gs[2]) / 2, (bs[1] + bs[2]) / 2)
-    }
 
-    private fun readCells(px: IntArray, n: Int): Array<Array<CellData>> {
-        val cs = n / 8f
-        return Array(8) { r ->
-            Array(8) { c ->
-                val x0 = c * cs; val y0 = r * cs
-                val bg = estimateBackground(px, n, x0, y0, cs)
-                val mask = BooleanArray(GRID * GRID)
-                var centerDev = 0
-                val lums = IntArray(16); var li = 0
-                for (gy in 0 until GRID) for (gx in 0 until GRID) {
-                    val x = (x0 + (gx + 0.5f) * cs / GRID).toInt().coerceIn(0, n - 1)
-                    val y = (y0 + (gy + 0.5f) * cs / GRID).toInt().coerceIn(0, n - 1)
-                    val p = px[y * n + x]
-                    val dev = abs(Color.red(p) - bg[0]) + abs(Color.green(p) - bg[1]) +
-                            abs(Color.blue(p) - bg[2]) > DEV_THRESHOLD
-                    mask[gy * GRID + gx] = dev
-                    if (dev && gx in 4..11 && gy in 4..11) centerDev++
-                    if (gx in 6..9 && gy in 6..9) lums[li++] = lum(p)
+        val edges = BooleanArray(w * h)
+        var edgeCount = 0
+        var highestEdgeY = 32
+        var topMinX = 32; var topMaxX = 0
+        var midMinX = 32; var midMaxX = 0
+        var symmetryDiff = 0
+
+        for (y in 4 until h - 4) {
+            for (x in 4 until w - 4) {
+                val idx = y * w + x
+                val gx = abs(gray[idx + 1] - gray[idx - 1])
+                val gy = abs(gray[idx + w] - gray[idx - w])
+                if (gx + gy > EDGE_GRAD) {
+                    edges[idx] = true
+                    edgeCount++
+                    if (y < highestEdgeY) highestEdgeY = y
+                    if (y in 5..12) { if (x < topMinX) topMinX = x; if (x > topMaxX) topMaxX = x }
+                    if (y in 13..20) { if (x < midMinX) midMinX = x; if (x > midMaxX) midMaxX = x }
                 }
-                lums.sort()
-                CellData(mask, centerDev / 64f >= OCCUPIED_COVERAGE, lums[8])
+                if (x in 7..15) symmetryDiff += abs(gray[idx] - gray[y * w + (31 - x)])
             }
         }
+
+        // Độ sáng trung vị vùng lõi để tách quân Trắng / Đen
+        val core = IntArray(81)
+        var k = 0
+        for (y in 14..22) for (x in 12..20) core[k++] = gray[y * w + x]
+        core.sort()
+
+        val topWidth = if (topMaxX >= topMinX) topMaxX - topMinX else 0
+        val midWidth = if (midMaxX >= midMinX) midMaxX - midMinX else 0
+        return CellFeature(edgeCount >= OCC_EDGE_MIN, edges, core[40], edgeCount, topWidth, midWidth, highestEdgeY, symmetryDiff)
     }
 
-    private fun classify(cell: CellData, white: Boolean): Char {
-        var best = '?'; var bestDiff = Int.MAX_VALUE
-        for (t in "KQRBNP") {
-            val ch = if (white) t else t.lowercaseChar()
-            val list = templates[ch] ?: continue
-            for (tpl in list) {
-                var d = 0
-                for (i in tpl.indices) if (cell.mask[i] != tpl[i]) d++
-                if (d < bestDiff) { bestDiff = d; best = ch }
+    /** Ngưỡng tách Trắng/Đen: k-means 2 cụm; nếu chỉ có 1 màu quân thì dùng ngưỡng đã nhớ. */
+    private fun lumThreshold(lums: List<Int>): Int {
+        var lo = lums.min(); var hi = lums.max()
+        if (hi - lo < 40) return lumThr
+        var thr = (lo + hi) / 2
+        repeat(8) {
+            val a = lums.filter { it <= thr }; val b = lums.filter { it > thr }
+            if (a.isNotEmpty() && b.isNotEmpty()) {
+                lo = a.average().toInt(); hi = b.average().toInt(); thr = (lo + hi) / 2
             }
         }
-        return if (bestDiff <= MATCH_MAX_DIFF) best else '?'
+        return thr
     }
 
-    // ------------------------------------------------------------ Học template
-
-    private fun templatesReady(): Boolean = TEMPLATE_CHARS.all { templates[it]?.isNotEmpty() == true }
-
-    private fun loadTemplates() {
-        for (ch in TEMPLATE_CHARS) {
-            val s = prefs.getString("TPL_${ch.code}", null) ?: continue
-            val list = ArrayList<BooleanArray>()
-            for (part in s.split(",")) {
-                if (part.length == GRID * GRID) list.add(BooleanArray(part.length) { part[it] == '1' })
-            }
-            if (list.isNotEmpty()) templates[ch] = list
-        }
-        lumThr = prefs.getInt("LUM_THR", 128)
-        whiteBottom = prefs.getBoolean("WHITE_BOTTOM", true)
-    }
-
-    private fun learnTemplates(cells: Array<Array<CellData>>) {
+    /** Tình cờ thấy thế khởi đầu thì học mẫu hình dạng quân để nhận diện chuẩn hơn (không bắt buộc). */
+    private fun tryLearn(f: Array<Array<CellFeature>>) {
+        if (learnedShapes.isNotEmpty()) return
         for (r in 0..7) for (c in 0..7) {
-            if (cells[r][c].occupied != (r <= 1 || r >= 6)) {
-                setStatus("Chưa phải thế khởi đầu (hoặc bàn cờ lệch). Mở ván mới, chỉnh ▲▼ rồi bấm 📚")
-                return
-            }
+            if (f[r][c].occupied != (r <= 1 || r >= 6)) return
         }
-        val topLum = (0..1).flatMap { r -> (0..7).map { cells[r][it].coreLum } }.average()
-        val botLum = (6..7).flatMap { r -> (0..7).map { cells[r][it].coreLum } }.average()
-        if (abs(botLum - topLum) < 40) {
-            setStatus("Không phân biệt được màu quân Trắng/Đen (độ tương phản thấp)")
-            return
-        }
+        val topLum = (0..1).flatMap { r -> (0..7).map { f[r][it].coreMedianLum } }.average()
+        val botLum = (6..7).flatMap { r -> (0..7).map { f[r][it].coreMedianLum } }.average()
+        if (abs(botLum - topLum) < 40) return
         val wb = botLum > topLum
         lumThr = ((botLum + topLum) / 2).toInt()
-        val order = if (wb) "RNBQKBNR" else "RNBKQBNR"
-        fun botCase(ch: Char) = if (wb) ch else ch.lowercaseChar()
-        fun topCase(ch: Char) = if (wb) ch.lowercaseChar() else ch
-
-        templates.clear()
-        fun addTpl(ch: Char, m: BooleanArray) { templates.getOrPut(ch) { ArrayList() }.add(m) }
-        for (c in 0..7) {
-            addTpl(botCase(order[c]), cells[7][c].mask)
-            addTpl(topCase(order[c]), cells[0][c].mask)
-            addTpl(botCase('P'), cells[6][c].mask)
-            addTpl(topCase('P'), cells[1][c].mask)
-        }
-
-        val ed = prefs.edit()
-        for ((ch, list) in templates) {
-            ed.putString("TPL_${ch.code}", list.joinToString(",") { m -> m.joinToString("") { if (it) "1" else "0" } })
-        }
-        ed.putInt("LUM_THR", lumThr).putBoolean("WHITE_BOTTOM", wb).apply()
-
-        whiteBottom = wb
-        resetGameState()
-        mainHandler.post {
-            chessOverlayView.isWhiteBottom = wb
-            btnSide.text = if (wb) "⚪ Trắng" else "⚫ Đen"
-            chessOverlayView.setMove(null)
-            tvStatus.text = "✅ Đã học ${templates.size} loại quân • bạn cầm ${if (wb) "Trắng" else "Đen"}"
-            mainHandler.postDelayed({ scanAndSuggest(true) }, 600)
+        val order = if (wb) charArrayOf('R', 'N', 'B', 'Q', 'K', 'B', 'N', 'R')
+                    else charArrayOf('R', 'N', 'B', 'K', 'Q', 'B', 'N', 'R')
+        for (c in 0..7) learnedShapes[order[c]] = f[7][c].edges
+        learnedShapes['P'] = f[6][3].edges
+        castleMem = "KQkq"
+        if (wb != whiteBottom) {
+            whiteBottom = wb
+            prefs.edit().putBoolean("WHITE_BOTTOM", wb).apply()
+            mainHandler.post {
+                chessOverlayView.isWhiteBottom = wb
+                btnSide.text = if (wb) "⚪ Trắng" else "⚫ Đen"
+            }
         }
     }
 
-    private fun resetGameState() {
-        pos = null; turnAssumed = false
-        pendingKey = ""; confirmedKey = ""
-        unexplainedKey = ""; unexplainedCount = 0
-        lastSuggestedFen = ""
+    private fun classifyPiece(r: Int, f: CellFeature): Char {
+        if (learnedShapes.isNotEmpty()) {
+            var bestP = 'P'
+            var minDiff = Int.MAX_VALUE
+            for ((pChar, tpl) in learnedShapes) {
+                if (pChar == 'P' && (r == 0 || r == 7)) continue
+                var diff = 0
+                for (i in 0 until CW * CW) if (f.edges[i] != tpl[i]) diff++
+                if (diff < minDiff) { minDiff = diff; bestP = pChar }
+            }
+            if (minDiff < TEMPLATE_MAX_DIFF) return bestP
+        }
+        if (f.symmetryDiff > 2800) return 'N'
+        if (r != 0 && r != 7 && f.highestEdgeY >= 9 && f.topZoneWidth <= 11 && f.edgeCount < 70) return 'P'
+        if (f.highestEdgeY <= 6 && f.topZoneWidth >= 14) return 'Q'
+        if (f.highestEdgeY <= 6 && f.topZoneWidth in 8..13) return 'K'
+        if (f.topZoneWidth >= 12 && abs(f.topZoneWidth - f.midZoneWidth) <= 3) return 'R'
+        if (f.highestEdgeY <= 8 && f.topZoneWidth < f.midZoneWidth) return 'B'
+        return if (r == 0 || r == 7) 'R' else 'P'
+    }
+
+    // ------------------------------------------------- Sửa thế cờ đọc nhiễu (như code cũ)
+
+    private fun sanitize(m: Array<CharArray>, feats: Array<Array<CellFeature>>) {
+        for (c in 0..7) {
+            if (m[0][c] == 'P') m[0][c] = 'Q'
+            if (m[0][c] == 'p') m[0][c] = 'r'
+            if (m[7][c] == 'P') m[7][c] = 'R'
+            if (m[7][c] == 'p') m[7][c] = 'q'
+        }
+        assignKing(m, feats, true)
+        assignKing(m, feats, false)
+        // Hai Vua sát nhau là bất hợp lệ -> tách ra
+        var wkR = 7; var wkC = 4; var bkR = 0; var bkC = 4
+        for (r in 0..7) for (c in 0..7) {
+            if (m[r][c] == 'K') { wkR = r; wkC = c }
+            if (m[r][c] == 'k') { bkR = r; bkC = c }
+        }
+        if (abs(wkR - bkR) <= 1 && abs(wkC - bkC) <= 1) {
+            m[bkR][bkC] = 'q'
+            m[0][4] = 'k'
+        }
+    }
+
+    private fun assignKing(m: Array<CharArray>, feats: Array<Array<CellFeature>>, isWhite: Boolean) {
+        val kingChar = if (isWhite) 'K' else 'k'
+        val queenChar = if (isWhite) 'Q' else 'q'
+        val cand = ArrayList<IntArray>()
+        for (r in 0..7) for (c in 0..7) if (m[r][c] == kingChar) cand.add(intArrayOf(r, c))
+        if (cand.size == 1) return
+        if (cand.size > 1) {
+            // giữ Vua ở gần hàng nhà nhất, các Vua còn lại thành Hậu
+            cand.sortBy { if (isWhite) 7 - it[0] else it[0] }
+            for (i in 1 until cand.size) m[cand[i][0]][cand[i][1]] = queenChar
+            return
+        }
+        var bestR = -1; var bestC = -1; var bestScore = -999
+        for (r in 0..7) for (c in 0..7) {
+            val ch = m[r][c]
+            if (ch != '1' && ch.isUpperCase() == isWhite) {
+                val f = feats[r][c]
+                val rankBonus = if (isWhite) (if (r == 7) 35 else 0) else (if (r == 0) 35 else 0)
+                val score = (32 - f.highestEdgeY) * 3 + f.edgeCount + rankBonus
+                if (score > bestScore) { bestScore = score; bestR = r; bestC = c }
+            }
+        }
+        if (bestR != -1) m[bestR][bestC] = kingChar
+        else m[if (isWhite) 7 else 0][4] = kingChar
     }
 
     // ---------------------------------------------------------------- Quét chính
+
+    private fun resetGameState() {
+        castleMem = "KQkq"; epSquare = "-"; prevStd = null
+        pendingKey = ""; confirmedKey = ""; lastSuggestedFen = ""
+    }
 
     private fun scanAndSuggest(manual: Boolean) {
         if (destroyed) return
@@ -625,131 +654,79 @@ class OverlayService : Service() {
         if (screenHeight <= screenWidth) { setStatus("Chỉ hỗ trợ màn hình dọc"); return }
 
         val px = captureBoard() ?: return
-        val cells = readCells(px, screenWidth)
+        val n = screenWidth
+        val cs = n / 8f
+        val feats = Array(8) { r -> Array(8) { c -> analyzeCell(px, n, c * cs, r * cs, cs) } }
 
-        if (learnRequested) { learnRequested = false; learnTemplates(cells); return }
-        if (!templatesReady()) {
-            setStatus("Chưa học quân: mở ván mới (thế khởi đầu) rồi bấm 📚"); return
+        val occLums = ArrayList<Int>()
+        for (r in 0..7) for (c in 0..7) if (feats[r][c].occupied) occLums.add(feats[r][c].coreMedianLum)
+        if (occLums.size < 2) { setStatus("Chưa thấy quân cờ • kiểm tra 4 góc xanh / chỉnh ▲▼"); return }
+        if (occLums.size > 32) {
+            setStatus("Thấy ${occLums.size} quân (quá nhiều) • tắt chấm gợi ý nước đi trong app cờ hoặc chỉnh ▲▼"); return
         }
 
-        var pieceCount = 0
-        for (r in 0..7) for (c in 0..7) if (cells[r][c].occupied) pieceCount++
-        if (pieceCount < 2) { setStatus("Chưa thấy quân cờ • kiểm tra 4 góc xanh / chỉnh ▲▼"); return }
-        if (pieceCount > 32) {
-            setStatus("Thấy $pieceCount quân (quá nhiều) • tắt chấm gợi ý nước đi trong app cờ hoặc chỉnh ▲▼"); return
-        }
+        tryLearn(feats)
+        val thr = lumThreshold(occLums)
 
         val raw = Array(8) { CharArray(8) { '1' } }
         for (r in 0..7) for (c in 0..7) {
-            val cell = cells[r][c]
-            if (!cell.occupied) continue
-            val ch = classify(cell, cell.coreLum >= lumThr)
-            if (ch == '?') {
-                setStatus("Có quân không nhận ra • thử 📚 học lại nếu đổi bộ quân/theme"); return
-            }
-            raw[r][c] = ch
+            val f = feats[r][c]
+            if (!f.occupied) continue
+            val ch = classifyPiece(r, f)
+            raw[r][c] = if (f.coreMedianLum >= thr) ch.uppercaseChar() else ch.lowercaseChar()
         }
+
         val white = whiteBottom
         val std = if (white) raw else Array(8) { r -> CharArray(8) { c -> raw[7 - r][7 - c] } }
+        val stdFeats = if (white) feats else Array(8) { r -> Array(8) { c -> feats[7 - r][7 - c] } }
+        sanitize(std, stdFeats)
+
         val key = Chess.fenBoard(std)
         Log.d(TAG, "board=$key")
-
-        validateBoard(std)?.let { setStatus("Đọc bàn cờ chưa chắc: $it"); return }
 
         // Auto: cần 2 lần quét liên tiếp giống nhau mới chấp nhận (tránh đọc giữa lúc quân đang di chuyển)
         if (!manual && key != confirmedKey) {
             if (key != pendingKey) { pendingKey = key; return }
         }
-        confirmedKey = key; pendingKey = ""
+        pendingKey = ""
 
-        val p = syncPosition(std, manual) ?: return
-
-        if (p.whiteToMove != white) {
-            mainHandler.post { chessOverlayView.setMove(null) }
-            setStatus("⏳ Chờ đối thủ (lượt ${if (p.whiteToMove) "Trắng" else "Đen"})" +
-                    (if (turnAssumed) " • lượt giả định, bấm 🔁 nếu sai" else ""))
-            return
+        if (key != confirmedKey) {
+            // Thế cờ vừa đổi -> cập nhật quyền nhập thành (chỉ giảm) và ô en passant
+            if (String(std[0]) + String(std[1]) + String(std[6]) + String(std[7]) ==
+                START_ROWS[0] + START_ROWS[1] + START_ROWS[6] + START_ROWS[7] &&
+                (2..5).all { String(std[it]) == "11111111" }) castleMem = "KQkq"
+            castleMem = pruneCastle(castleMem, std)
+            epSquare = prevStd?.let { detectEp(it, std, white) } ?: "-"
+            prevStd = Chess.copy(std)
+            confirmedKey = key
         }
-        suggest(p, manual, pieceCount)
+
+        suggest(Position(std, white, castleMem, epSquare), manual, occLums.size)
     }
 
-    // ------------------------------------------------------ Theo dõi trạng thái ván
-
-    private fun isStart(m: Array<CharArray>): Boolean {
-        for (r in 0..7) if (String(m[r]) != START_ROWS[r]) return false
-        return true
+    private fun pruneCastle(rights: String, m: Array<CharArray>): String {
+        val sb = StringBuilder()
+        if ('K' in rights && m[7][4] == 'K' && m[7][7] == 'R') sb.append('K')
+        if ('Q' in rights && m[7][4] == 'K' && m[7][0] == 'R') sb.append('Q')
+        if ('k' in rights && m[0][4] == 'k' && m[0][7] == 'r') sb.append('k')
+        if ('q' in rights && m[0][4] == 'k' && m[0][0] == 'r') sb.append('q')
+        return if (sb.isEmpty()) "-" else sb.toString()
     }
 
-    private fun syncPosition(std: Array<CharArray>, manual: Boolean): Position? {
-        val cur = pos ?: return resync(std)
-        if (cur.sameBoard(std)) return cur
-
-        val next = findTransition(cur, std)
-        if (next != null) {
-            pos = next; turnAssumed = false
-            unexplainedKey = ""; unexplainedCount = 0
-            return next
-        }
-        if (isStart(std)) return resync(std)
-
-        val key = Chess.fenBoard(std)
-        if (key == unexplainedKey) unexplainedCount++ else { unexplainedKey = key; unexplainedCount = 1 }
-        if (manual || unexplainedCount >= 2) return resync(std)
-        setStatus("Thế cờ chưa khớp nước đi hợp lệ nào, đang xác nhận lại...")
-        return null
-    }
-
-    /** Thế mới có phải kết quả của 1 hoặc 2 nước hợp lệ từ thế cũ không? */
-    private fun findTransition(cur: Position, std: Array<CharArray>): Position? {
-        val l1 = Chess.legal(cur)
-        for (m in l1) {
-            val p1 = Chess.apply(cur, m)
-            if (p1.sameBoard(std)) return p1
-        }
-        for (m in l1) {
-            val p1 = Chess.apply(cur, m)
-            for (m2 in Chess.legal(p1)) {
-                val p2 = Chess.apply(p1, m2)
-                if (p2.sameBoard(std)) return p2
+    /** Đối thủ vừa đi tốt 2 ô giữa 2 lần quét -> ô en passant (chỉ khi mình có tốt đứng kề). */
+    private fun detectEp(p: Array<CharArray>, m: Array<CharArray>, myWhite: Boolean): String {
+        for (c in 0..7) {
+            if (myWhite) {
+                if (p[1][c] == 'p' && p[2][c] == '1' && p[3][c] == '1' && m[1][c] == '1' && m[2][c] == '1' && m[3][c] == 'p') {
+                    if ((c > 0 && m[3][c - 1] == 'P') || (c < 7 && m[3][c + 1] == 'P')) return "${'a' + c}6"
+                }
+            } else {
+                if (p[6][c] == 'P' && p[5][c] == '1' && p[4][c] == '1' && m[6][c] == '1' && m[5][c] == '1' && m[4][c] == 'P') {
+                    if ((c > 0 && m[4][c - 1] == 'p') || (c < 7 && m[4][c + 1] == 'p')) return "${'a' + c}3"
+                }
             }
         }
-        return null
-    }
-
-    /** Khởi tạo/đồng bộ lại: không biết lịch sử nên không cho nhập thành (trừ thế khởi đầu), lượt đi là giả định. */
-    private fun resync(std: Array<CharArray>): Position? {
-        unexplainedKey = ""; unexplainedCount = 0
-        val start = isStart(std)
-        var p = Position(Chess.copy(std), if (start) true else whiteBottom, if (start) "KQkq" else "-", "-")
-        turnAssumed = !start
-        // Bên không có lượt mà đang bị chiếu là bất hợp lệ -> lượt phải là của bên kia
-        if (Chess.inCheck(p.b, !p.whiteToMove)) p = Position(p.b, !p.whiteToMove, "-", "-")
-        if (Chess.inCheck(p.b, !p.whiteToMove)) {
-            setStatus("Cả hai Vua đều bị chiếu → chắc chắn đọc sai bàn cờ"); pos = null; return null
-        }
-        pos = p
-        lastSuggestedFen = ""
-        return p
-    }
-
-    private fun validateBoard(m: Array<CharArray>): String? {
-        var wk = 0; var bk = 0; var wn = 0; var bn = 0; var wp = 0; var bp = 0
-        var wkR = -1; var wkC = -1; var bkR = -1; var bkC = -1
-        for (r in 0..7) for (c in 0..7) {
-            val ch = m[r][c]
-            if (ch == '1') continue
-            if (ch.isUpperCase()) wn++ else bn++
-            when (ch) {
-                'K' -> { wk++; wkR = r; wkC = c }
-                'k' -> { bk++; bkR = r; bkC = c }
-                'P' -> { wp++; if (r == 0 || r == 7) return "tốt ở hàng cuối" }
-                'p' -> { bp++; if (r == 0 || r == 7) return "tốt ở hàng cuối" }
-            }
-        }
-        if (wk != 1 || bk != 1) return "cần đúng 1 Vua mỗi bên (thấy $wk trắng / $bk đen)"
-        if (wn > 16 || bn > 16 || wp > 8 || bp > 8) return "số quân vượt mức hợp lệ"
-        if (abs(wkR - bkR) <= 1 && abs(wkC - bkC) <= 1) return "hai Vua đứng sát nhau"
-        return null
+        return "-"
     }
 
     // ------------------------------------------------------------ Gợi ý nước đi
@@ -776,8 +753,7 @@ class OverlayService : Service() {
         lastSuggestedFen = fen
 
         val promo = if (mv.length == 5) "=${mv[4].uppercaseChar()}" else ""
-        val text = "✅ ${mv.substring(0, 2).uppercase()} ➔ ${mv.substring(2, 4).uppercase()}$promo " +
-                "($src, $pieceCount quân)" + (if (turnAssumed) " • lượt giả định, 🔁 nếu sai" else "")
+        val text = "✅ ${mv.substring(0, 2).uppercase()} ➔ ${mv.substring(2, 4).uppercase()}$promo ($src, $pieceCount quân)"
         val shown = mv.substring(0, 4)
         mainHandler.post {
             chessOverlayView.setMove(shown)
@@ -844,7 +820,7 @@ class OverlayService : Service() {
         val channel = NotificationChannel(channelId, "Chess Overlay", NotificationManager.IMPORTANCE_LOW)
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         val notif = Notification.Builder(this, channelId)
-            .setContentTitle("Chess Vision v6.0")
+            .setContentTitle("Chess Vision v6.1")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .build()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
