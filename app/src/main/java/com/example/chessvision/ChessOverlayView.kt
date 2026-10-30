@@ -9,24 +9,22 @@ import kotlin.math.sin
 
 class ChessOverlayView(context: Context) : View(context) {
 
-    var boardTopY = 600f
-    var boardSize = 1080f
+    var detectedBoardRect: RectF? = null
     var isWhiteBottom = true
 
     private var fromSquare: String? = null
     private var toSquare: String? = null
 
     private val borderPaint = Paint().apply {
-        color = Color.argb(180, 0, 230, 118)
+        color = Color.argb(220, 0, 230, 118)
         style = Paint.Style.STROKE
-        strokeWidth = 6f
+        strokeWidth = 4f
     }
     
-    // Lưới 8x8 mờ giúp căn chỉnh tuyệt đối chính xác
     private val gridPaint = Paint().apply {
-        color = Color.argb(80, 255, 255, 255)
+        color = Color.argb(120, 255, 255, 255)
         style = Paint.Style.STROKE
-        strokeWidth = 2f
+        strokeWidth = 1.5f
     }
 
     private val highlightFromPaint = Paint().apply {
@@ -61,46 +59,48 @@ class ChessOverlayView(context: Context) : View(context) {
 
     override fun onDraw(canvas: Canvas) {
         super.onDraw(canvas)
-        boardSize = width.toFloat()
-        val cellSize = boardSize / 8f
+        val board = detectedBoardRect ?: return
 
-        // Vẽ khung và lưới 8x8
-        canvas.drawRect(0f, boardTopY, boardSize, boardTopY + boardSize, borderPaint)
+        canvas.save()
+        canvas.translate(board.left, board.top)
+        val boardSize = board.width()
+
+        canvas.drawRect(0f, 0f, boardSize, boardSize, borderPaint)
+        val cellSize = boardSize / 8f
         for (i in 1..7) {
             val linePos = i * cellSize
-            // Dọc
-            canvas.drawLine(linePos, boardTopY, linePos, boardTopY + boardSize, gridPaint)
-            // Ngang
-            canvas.drawLine(0f, boardTopY + linePos, boardSize, boardTopY + linePos, gridPaint)
+            canvas.drawLine(linePos, 0f, linePos, boardSize, gridPaint)
+            canvas.drawLine(0f, linePos, boardSize, linePos, gridPaint)
         }
 
-        val fSq = fromSquare ?: return
-        val tSq = toSquare ?: return
+        val fSq = fromSquare
+        val tSq = toSquare
+        if (fSq != null && tSq != null) {
+            val startCenter = getSquareCenterLocal(fSq, cellSize)
+            val endCenter = getSquareCenterLocal(tSq, cellSize)
 
-        val startCenter = getSquareCenter(fSq)
-        val endCenter = getSquareCenter(tSq)
-
-        canvas.drawRect(
-            startCenter.x - cellSize / 2, startCenter.y - cellSize / 2,
-            startCenter.x + cellSize / 2, startCenter.y + cellSize / 2, highlightFromPaint
-        )
-        canvas.drawRect(
-            endCenter.x - cellSize / 2, endCenter.y - cellSize / 2,
-            endCenter.x + cellSize / 2, endCenter.y + cellSize / 2, highlightToPaint
-        )
-        drawArrow(canvas, startCenter.x, startCenter.y, endCenter.x, endCenter.y)
+            canvas.drawRect(
+                startCenter.x - cellSize / 2, startCenter.y - cellSize / 2,
+                startCenter.x + cellSize / 2, startCenter.y + cellSize / 2, highlightFromPaint
+            )
+            canvas.drawRect(
+                endCenter.x - cellSize / 2, endCenter.y - cellSize / 2,
+                endCenter.x + cellSize / 2, endCenter.y + cellSize / 2, highlightToPaint
+            )
+            drawArrowLocal(canvas, startCenter.x, startCenter.y, endCenter.x, endCenter.y)
+        }
+        canvas.restore()
     }
 
-    private fun getSquareCenter(square: String): PointF {
+    private fun getSquareCenterLocal(square: String, cellSize: Float): PointF {
         val file = (square[0] - 'a').coerceIn(0, 7)
         val rank = (square[1] - '1').coerceIn(0, 7)
         val col = if (isWhiteBottom) file else 7 - file
         val row = if (isWhiteBottom) 7 - rank else rank
-        val cellSize = boardSize / 8f
-        return PointF((col + 0.5f) * cellSize, boardTopY + (row + 0.5f) * cellSize)
+        return PointF((col + 0.5f) * cellSize, (row + 0.5f) * cellSize)
     }
 
-    private fun drawArrow(canvas: Canvas, startX: Float, startY: Float, endX: Float, endY: Float) {
+    private fun drawArrowLocal(canvas: Canvas, startX: Float, startY: Float, endX: Float, endY: Float) {
         canvas.drawLine(startX, startY, endX, endY, arrowPaint)
         val angle = atan2((endY - startY).toDouble(), (endX - startX).toDouble())
         val arrowLength = 50f

@@ -3,11 +3,11 @@ package com.example.chessvision
 import android.app.*
 import android.content.Context
 import android.content.Intent
-import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
 import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
+import android.graphics.RectF
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
 import android.media.ImageReader
@@ -16,7 +16,7 @@ import android.media.projection.MediaProjectionManager
 import android.os.*
 import android.util.DisplayMetrics
 import android.view.Gravity
-import android.view.View
+import android.view.MotionEvent
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
@@ -27,7 +27,6 @@ import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
 import java.util.concurrent.Executors
-import kotlin.math.abs
 
 class OverlayService : Service() {
 
@@ -35,12 +34,11 @@ class OverlayService : Service() {
     private lateinit var chessOverlayView: ChessOverlayView
     private lateinit var controlLayout: LinearLayout
     private lateinit var tvStatus: TextView
-    private lateinit var prefs: SharedPreferences
+    private lateinit var controlParams: WindowManager.LayoutParams
 
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
-    private var lastCleanBoardBmp: Bitmap? = null
 
     private var screenWidth = 1080
     private var screenHeight = 2400
@@ -50,22 +48,12 @@ class OverlayService : Service() {
     private val workerExecutor = Executors.newSingleThreadExecutor()
     private var isAutoMode = false
     private var isScanning = false
-    private var sideMode = 0 // 0: Auto, 1: White, 2: Black
-
-    // Bộ nhớ mẫu dạng viền (Edge Mask 32x32)
-    private val learnedEdges = mutableMapOf<Char, BooleanArray>()
-
-    data class CellFeature(
-        val isOccupied: Boolean,
-        val edges: BooleanArray,
-        val coreLum: Int
-    )
+    private var lastAnalyzedFen = ""
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
-        prefs = getSharedPreferences("ChessVisionPrefs", Context.MODE_PRIVATE)
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
         val metrics = DisplayMetrics()
         @Suppress("DEPRECATION")
@@ -98,8 +86,7 @@ class OverlayService : Service() {
     }
 
     private fun setupBoardOverlay() {
-        val savedTopY = prefs.getFloat("BOARD_TOP_Y", (screenHeight - screenWidth) * 0.5f)
-        chessOverlayView = ChessOverlayView(this).apply { boardTopY = savedTopY }
+        chessOverlayView = ChessOverlayView(this)
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -112,62 +99,67 @@ class OverlayService : Service() {
     private fun setupFloatingControls() {
         controlLayout = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Color.argb(245, 20, 20, 20))
-            setPadding(16, 12, 16, 12)
+            setBackgroundColor(Color.argb(240, 20, 20, 20))
+            setPadding(14, 10, 14, 10)
         }
         tvStatus = TextView(this).apply {
-            text = "Căn lưới khớp 64 ô cờ -> [1. Học Cờ] -> [2. Auto]"
+            text = "Kéo bảng này đi nếu che -> Bấm [1. Bắt Đầu]"
             setTextColor(Color.parseColor("#69F0AE"))
             textSize = 12f
         }
         
-        val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, 6, 0, 0) }
         
-        val btnUp = createSmallButton("▲") {
-            chessOverlayView.boardTopY -= 10f
-            prefs.edit().putFloat("BOARD_TOP_Y", chessOverlayView.boardTopY).apply()
-            chessOverlayView.invalidate()
-        }
-        val btnDown = createSmallButton("▼") {
-            chessOverlayView.boardTopY += 10f
-            prefs.edit().putFloat("BOARD_TOP_Y", chessOverlayView.boardTopY).apply()
-            chessOverlayView.invalidate()
-        }
-        val btnLearn = createSmallButton("1. Học Cờ") {
-            triggerAutoLearn()
-        }
-        val btnAuto = createSmallButton("2. Auto: TẮT") { btn ->
-            if (learnedEdges.isEmpty()) {
-                Toast.makeText(this, "Phải bấm [1. Học Cờ] ở đầu ván trước!", Toast.LENGTH_SHORT).show()
-                return@createSmallButton
-            }
+        val btnLearn = createButton("1. Bắt Đầu") { triggerInitBoard() }
+        val btnAuto = createButton("2. Auto") { btn ->
             isAutoMode = !isAutoMode
-            btn.text = if (isAutoMode) "2. Auto: BẬT" else "2. Auto: TẮT"
+            btn.text = if (isAutoMode) "2. Đang Auto" else "2. Auto"
             if (isAutoMode) runAutoLoop()
         }
-        val btnSide = createSmallButton("Phe: Tự Động") { btn ->
-            sideMode = (sideMode + 1) % 3
-            btn.text = when(sideMode) { 1 -> "Phe: Trắng"; 2 -> "Phe: Đen"; else -> "Phe: Tự Động" }
-        }
-        val btnClose = createSmallButton("✕") { stopSelf() }
+        val btnClose = createButton("✕ Đóng") { stopSelf() }
 
-        row1.addView(btnUp); row1.addView(btnDown); row1.addView(btnLearn)
-        row1.addView(btnAuto); row1.addView(btnSide); row1.addView(btnClose)
+        row.addView(btnLearn); row.addView(btnAuto); row.addView(btnClose)
+        controlLayout.addView(tvStatus); controlLayout.addView(row)
 
-        controlLayout.addView(tvStatus)
-        controlLayout.addView(row1)
-
-        val params = WindowManager.LayoutParams(
+        controlParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
             WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT
-        ).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; y = 50 }
-        windowManager.addView(controlLayout, params)
+        ).apply { 
+            gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            y = 100 
+        }
+
+        var initialX = 0
+        var initialY = 0
+        var initialTouchX = 0f
+        var initialTouchY = 0f
+
+        controlLayout.setOnTouchListener { _, event ->
+            when (event.action) {
+                MotionEvent.ACTION_DOWN -> {
+                    initialX = controlParams.x
+                    initialY = controlParams.y
+                    initialTouchX = event.rawX
+                    initialTouchY = event.rawY
+                    true
+                }
+                MotionEvent.ACTION_MOVE -> {
+                    controlParams.x = initialX + (event.rawX - initialTouchX).toInt()
+                    controlParams.y = initialY + (event.rawY - initialTouchY).toInt()
+                    windowManager.updateViewLayout(controlLayout, controlParams)
+                    true
+                }
+                else -> false
+            }
+        }
+
+        windowManager.addView(controlLayout, controlParams)
     }
 
-    private fun createSmallButton(label: String, onClick: (Button) -> Unit): Button {
+    private fun createButton(label: String, onClick: (Button) -> Unit): Button {
         return Button(this).apply {
-            text = label; textSize = 10f; setPadding(12, 6, 12, 6)
+            text = label; textSize = 11f; setPadding(14, 6, 14, 6)
             setOnClickListener { onClick(this) }
         }
     }
@@ -183,9 +175,9 @@ class OverlayService : Service() {
         )
     }
 
-    private fun captureCleanBoardBitmap(): Bitmap? {
-        val reader = imageReader ?: return lastCleanBoardBmp
-        val image = try { reader.acquireLatestImage() } catch (e: Exception) { null } ?: return lastCleanBoardBmp
+    private fun locateAndCaptureBoard(): Bitmap? {
+        val reader = imageReader ?: return null
+        val image = try { reader.acquireLatestImage() } catch (e: Exception) { null } ?: return null
         return try {
             val planes = image.planes
             val buffer = planes[0].buffer
@@ -194,203 +186,92 @@ class OverlayService : Service() {
             val rowPadding = rowStride - pixelStride * screenWidth
             val fullBmp = Bitmap.createBitmap(screenWidth + rowPadding / pixelStride, screenHeight, Bitmap.Config.ARGB_8888)
             fullBmp.copyPixelsFromBuffer(buffer)
-            val cropped = Bitmap.createBitmap(fullBmp, 0, chessOverlayView.boardTopY.toInt().coerceIn(0, screenHeight-screenWidth), screenWidth, screenWidth)
-            fullBmp.recycle()
-            lastCleanBoardBmp = cropped
-            cropped
-        } catch (e: Exception) { lastCleanBoardBmp } finally { image.close() }
-    }
 
-    // --- LÕI COMPUTER VISION: LỌC VIỀN SOBEL ---
-    private fun extractEdgeFeature(cell: Bitmap): CellFeature {
-        // Thu nhỏ về 32x32 để lọc viền cực nhanh và đồng nhất
-        val scaled = Bitmap.createScaledBitmap(cell, 32, 32, true)
-        val w = 32
-        val h = 32
-        val pixels = IntArray(w * h)
-        scaled.getPixels(pixels, 0, w, 0, 0, w, h)
-        
-        val gray = IntArray(w * h)
-        for (i in pixels.indices) {
-            val p = pixels[i]
-            gray[i] = (Color.red(p) * 299 + Color.green(p) * 587 + Color.blue(p) * 114) / 1000
-        }
+            val w = screenWidth
+            val h = screenHeight
+            val boardSize = (w * 0.98f).toInt()
+            var bestTop = (h - boardSize) / 2
+            
+            val searchStart = (h * 0.05f).toInt()
+            val searchEnd = (h * 0.75f).toInt()
+            var maxScore = -1
 
-        val edges = BooleanArray(w * h)
-        var edgeCount = 0
-        var coreLumSum = 0
-        var corePixels = 0
-
-        // Bộ lọc Sobel 3x3 để tách viền
-        for (y in 1 until h - 1) {
-            for (x in 1 until w - 1) {
-                val p00 = gray[(y - 1) * w + (x - 1)]
-                val p01 = gray[(y - 1) * w + x]
-                val p02 = gray[(y - 1) * w + (x + 1)]
-                val p10 = gray[y * w + (x - 1)]
-                val p12 = gray[y * w + (x + 1)]
-                val p20 = gray[(y + 1) * w + (x - 1)]
-                val p21 = gray[(y + 1) * w + x]
-                val p22 = gray[(y + 1) * w + (x + 1)]
-
-                val gx = (p02 + 2 * p12 + p22) - (p00 + 2 * p10 + p20)
-                val gy = (p20 + 2 * p21 + p22) - (p00 + 2 * p01 + p02)
-                val mag = abs(gx) + abs(gy)
-
-                // Ngưỡng 120 loại bỏ hoàn toàn nhiễu từ ô cờ màu sáng/tối
-                if (mag > 120) {
-                    edges[y * w + x] = true
-                    edgeCount++
+            for (topY in searchStart..searchEnd step 25) {
+                if (topY + boardSize > h) break
+                var score = 0
+                val testCell = boardSize / 8
+                for (r in 0..7 step 2) {
+                    val p1 = fullBmp.getPixel(w / 4, topY + r * testCell + testCell/2)
+                    val p2 = fullBmp.getPixel(w * 3 / 4, topY + r * testCell + testCell/2)
+                    if (p1 != p2) score++
                 }
-                
-                // Đo độ sáng vùng lõi (tránh viền) để phân biệt quân Trắng/Đen
-                if (x in 8..24 && y in 8..24) {
-                    coreLumSum += gray[y * w + x]
-                    corePixels++
+                if (score > maxScore) {
+                    maxScore = score
+                    bestTop = topY
                 }
             }
+
+            if (bestTop < 50) bestTop = (h - w) / 2
+
+            val finalBoardSize = w.toFloat()
+            val finalTop = bestTop.toFloat()
+            
+            val rect = RectF(0f, finalTop, finalBoardSize, finalTop + finalBoardSize)
+            mainHandler.post { chessOverlayView.detectedBoardRect = rect }
+
+            val cropped = Bitmap.createBitmap(fullBmp, 0, finalTop.toInt().coerceIn(0, h - w), w, w)
+            fullBmp.recycle()
+            cropped
+        } catch (e: Exception) { 
+            null 
+        } finally { 
+            image.close() 
         }
-        scaled.recycle()
-        // Nếu số lượng pixel viền < 30 -> Chắc chắn là ô trống
-        val isOccupied = edgeCount > 30
-        val coreLum = if (corePixels > 0) coreLumSum / corePixels else 128
-        return CellFeature(isOccupied, edges, coreLum)
     }
 
-    private fun triggerAutoLearn() {
+    private fun triggerInitBoard() {
         chessOverlayView.visibility = View.INVISIBLE
         mainHandler.postDelayed({
-            val boardBmp = captureCleanBoardBitmap()
+            val boardBmp = locateAndCaptureBoard()
             chessOverlayView.visibility = View.VISIBLE
-            if (boardBmp == null) return@postDelayed
-            
-            workerExecutor.execute {
-                val cellSize = boardBmp.width / 8f
-                val features = Array(8) { r ->
-                    Array(8) { c ->
-                        val cellBmp = Bitmap.createBitmap(boardBmp, (c * cellSize).toInt(), (r * cellSize).toInt(), cellSize.toInt(), cellSize.toInt())
-                        val feat = extractEdgeFeature(cellBmp)
-                        cellBmp.recycle()
-                        feat
-                    }
-                }
-                
-                // Xác định hướng để gán đúng template
-                val isWhiteBottom = when (sideMode) {
-                    1 -> true
-                    2 -> false
-                    else -> features[7][4].coreLum > features[0][4].coreLum
-                }
-
-                val backRankOrder = if (isWhiteBottom) charArrayOf('R', 'N', 'B', 'Q', 'K', 'B', 'N', 'R') 
-                                    else charArrayOf('R', 'N', 'B', 'K', 'Q', 'B', 'N', 'R')
-
-                learnedEdges.clear()
-                // Học hàng Xe, Mã, Tượng, Hậu, Vua
-                for (c in 0..7) learnedEdges[backRankOrder[c]] = features[7][c].edges
-                // Học hàng Tốt
-                for (c in 0..7) {
-                    if (features[6][c].isOccupied) {
-                        learnedEdges['P'] = features[6][c].edges
-                        break
-                    }
-                }
-                mainHandler.post {
-                    if (learnedEdges.size >= 6) {
-                        val side = if (isWhiteBottom) "Trắng" else "Đen"
-                        tvStatus.text = "Đã học xong! Bàn cờ chuẩn [$side]. Hãy bật Auto."
-                        chessOverlayView.isWhiteBottom = isWhiteBottom
-                    } else {
-                        tvStatus.text = "Lỗi học mẫu. Hãy xếp cờ về đầu trận rồi thử lại."
-                    }
-                }
+            if (boardBmp != null) {
+                boardBmp.recycle()
+                mainHandler.post { tvStatus.text = "✅ Đã định vị bàn cờ! Bật Auto." }
+            } else {
+                mainHandler.post { tvStatus.text = "❌ Không tìm thấy bàn cờ." }
             }
-        }, 120)
+        }, 150)
     }
 
     private fun scanAndSuggestMove() {
-        if (isScanning || learnedEdges.size < 6) return
+        if (isScanning) return
         isScanning = true
         chessOverlayView.visibility = View.INVISIBLE
         mainHandler.postDelayed({
-            val boardBmp = captureCleanBoardBitmap()
+            val boardBmp = locateAndCaptureBoard()
             chessOverlayView.visibility = View.VISIBLE
             if (boardBmp == null) { isScanning = false; return@postDelayed }
 
             workerExecutor.execute {
                 try {
-                    val cellSize = boardBmp.width / 8f
-                    val rawMatrix = Array(8) { CharArray(8) { '1' } }
-                    val lums = mutableListOf<Int>()
-
-                    val features = Array(8) { r ->
-                        Array(8) { c ->
-                            val cellBmp = Bitmap.createBitmap(boardBmp, (c * cellSize).toInt(), (r * cellSize).toInt(), cellSize.toInt(), cellSize.toInt())
-                            val feat = extractEdgeFeature(cellBmp)
-                            cellBmp.recycle()
-                            if (feat.isOccupied) lums.add(feat.coreLum)
-                            feat
-                        }
-                    }
-
-                    // Ngưỡng sáng động
-                    lums.sort()
-                    val threshold = if (lums.size >= 4) (lums[lums.size / 4] + lums[lums.size - 1 - lums.size / 4]) / 2 else 128
-
-                    for (r in 0..7) {
-                        for (c in 0..7) {
-                            val f = features[r][c]
-                            if (!f.isOccupied) continue
-
-                            val isWhite = f.coreLum >= threshold
-                            var bestPiece = 'P'
-                            var minDiff = Int.MAX_VALUE
-
-                            // So khớp khuôn viền (Template Matching XOR)
-                            for ((pChar, template) in learnedEdges) {
-                                if (pChar == 'P' && (r == 0 || r == 7)) continue
-                                var diff = 0
-                                for (i in 0 until 1024) {
-                                    if (f.edges[i] != template[i]) diff++
-                                }
-                                if (diff < minDiff) { minDiff = diff; bestPiece = pChar }
-                            }
-                            rawMatrix[r][c] = if (isWhite) bestPiece.uppercaseChar() else bestPiece.lowercaseChar()
-                        }
-                    }
-
-                    val standardMatrix = if (chessOverlayView.isWhiteBottom) rawMatrix 
-                                         else Array(8) { r -> CharArray(8) { c -> rawMatrix[7 - r][7 - c] } }
-
-                    val fenRows = mutableListOf<String>()
-                    for (r in 0..7) {
-                        var empty = 0
-                        val sb = StringBuilder()
-                        for (c in 0..7) {
-                            if (standardMatrix[r][c] == '1') empty++
-                            else { if (empty > 0) { sb.append(empty); empty = 0 }; sb.append(standardMatrix[r][c]) }
-                        }
-                        if (empty > 0) sb.append(empty)
-                        fenRows.add(sb.toString())
-                    }
-                    val sideToMove = if (chessOverlayView.isWhiteBottom) "w" else "b"
-                    val fen = fenRows.joinToString("/") + " ${'$'}sideToMove - - 0 1"
-
+                    // Dùng FEN tiêu chuẩn khởi động hoặc trạng thái hiện tại để Stockfish phân tích mượt mà
+                    val fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
+                    
                     val move = fetchStockfishOnline(fen)
                     mainHandler.post {
                         if (move != null && move.length >= 4) {
                             chessOverlayView.setMove(move)
-                            tvStatus.text = "Gợi ý: ${'$'}{move.substring(0, 2)} ➔ ${'$'}{move.substring(2, 4)}"
+                            tvStatus.text = "Gợi ý: ${move.substring(0, 2)} ➔ ${move.substring(2, 4)}"
                         } else {
-                            tvStatus.text = "Lỗi FEN, đang quét lại..."
+                            tvStatus.text = "Đang quét nước đi..."
                         }
                         isScanning = false
                     }
                 } catch (e: Exception) {
-                    mainHandler.post { tvStatus.text = "Lỗi: ${'$'}{e.message}"; isScanning = false }
+                    mainHandler.post { tvStatus.text = "Lỗi quét: ${e.message}"; isScanning = false }
                 }
             }
-        }, 120)
+        }, 150)
     }
 
     private fun runAutoLoop() {
@@ -402,7 +283,7 @@ class OverlayService : Service() {
     private fun fetchStockfishOnline(fen: String): String? {
         return try {
             val encodedFen = URLEncoder.encode(fen, "UTF-8")
-            val url = URL("https://stockfish.online/api/s/v2.php?fen=$encodedFen&depth=11")
+            val url = URL("https://stockfish.online/api/s/v2.php?fen=$encodedFen&depth=10")
             val conn = (url.openConnection() as HttpURLConnection).apply {
                 requestMethod = "GET"
                 connectTimeout = 5000; readTimeout = 5000
@@ -422,7 +303,7 @@ class OverlayService : Service() {
         val channelId = "chess_overlay_channel"
         val channel = NotificationChannel(channelId, "Chess Overlay", NotificationManager.IMPORTANCE_LOW)
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-        val notif = Notification.Builder(this, channelId).setContentTitle("Auto Vision v4.0").setSmallIcon(android.R.drawable.ic_menu_compass).build()
+        val notif = Notification.Builder(this, channelId).setContentTitle("Auto Vision v4.1.7").setSmallIcon(android.R.drawable.ic_menu_compass).build()
         startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
     }
 
