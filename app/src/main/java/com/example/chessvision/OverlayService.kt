@@ -17,6 +17,7 @@ import android.os.*
 import android.util.DisplayMetrics
 import android.view.Gravity
 import android.view.MotionEvent
+import android.view.View
 import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
@@ -254,9 +255,7 @@ class OverlayService : Service() {
 
             workerExecutor.execute {
                 try {
-                    // Dùng FEN tiêu chuẩn khởi động hoặc trạng thái hiện tại để Stockfish phân tích mượt mà
                     val fen = "rnbqkbnr/pppppppp/8/8/4P3/8/PPPP1PPP/RNBQKBNR b KQkq - 0 1"
-                    
                     val move = fetchStockfishOnline(fen)
                     mainHandler.post {
                         if (move != null && move.length >= 4) {
@@ -303,7 +302,7 @@ class OverlayService : Service() {
         val channelId = "chess_overlay_channel"
         val channel = NotificationChannel(channelId, "Chess Overlay", NotificationManager.IMPORTANCE_LOW)
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-        val notif = Notification.Builder(this, channelId).setContentTitle("Auto Vision v4.1.7").setSmallIcon(android.R.drawable.ic_menu_compass).build()
+        val notif = Notification.Builder(this, channelId).setContentTitle("Auto Vision v4.1.8").setSmallIcon(android.R.drawable.ic_menu_compass).build()
         startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
     }
 
