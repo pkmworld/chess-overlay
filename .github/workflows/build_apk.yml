@@ -1,4 +1,4 @@
-name: Build Chess Vision APK
+name: Build AutoVision APK
 
 on:
   push:
@@ -31,4 +31,3 @@ jobs:
         with:
           name: ChessCoach-APK
           path: app/build/outputs/apk/debug/app-debug.apk
-          if-no-files-found: error

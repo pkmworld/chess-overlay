@@ -9,7 +9,7 @@
 
     <application
         android:allowBackup="true"
-        android:label="Chess Vision"
+        android:label="Chess Vision v6.0"
         android:supportsRtl="true"
         android:theme="@style/Theme.AppCompat.Light.NoActionBar">
 

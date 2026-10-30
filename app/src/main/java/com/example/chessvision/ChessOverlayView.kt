@@ -9,17 +9,17 @@ import kotlin.math.sin
 
 class ChessOverlayView(context: Context) : View(context) {
 
-    var detectedBoardRect: RectF? = null
-    var isWhiteBottom = true
-    var showCornerMarkers = true
+    @Volatile var detectedBoardRect: RectF? = null
+    @Volatile var isWhiteBottom = true
 
     private var fromSquare: String? = null
     private var toSquare: String? = null
+    private var promotionPiece: Char? = null
 
     private val cornerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(180, 0, 230, 118)
+        color = Color.argb(190, 0, 230, 118)
         style = Paint.Style.STROKE
-        strokeWidth = 6f
+        strokeWidth = 5f
         strokeCap = Paint.Cap.ROUND
     }
 
@@ -28,7 +28,7 @@ class ChessOverlayView(context: Context) : View(context) {
         style = Paint.Style.FILL
     }
     private val highlightToPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(135, 0, 230, 118)
+        color = Color.argb(145, 0, 230, 118)
         style = Paint.Style.FILL
     }
     private val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
@@ -41,14 +41,26 @@ class ChessOverlayView(context: Context) : View(context) {
         color = Color.argb(245, 0, 230, 118)
         style = Paint.Style.FILL
     }
+    private val promoBgPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(235, 213, 0, 0)
+        style = Paint.Style.FILL
+    }
+    private val promoTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.WHITE
+        textSize = 34f
+        typeface = Typeface.DEFAULT_BOLD
+        textAlign = Paint.Align.CENTER
+    }
 
     fun setMove(uciMove: String?) {
         if (uciMove != null && uciMove.length >= 4) {
             fromSquare = uciMove.substring(0, 2)
             toSquare = uciMove.substring(2, 4)
+            promotionPiece = if (uciMove.length >= 5) uciMove[4].uppercaseChar() else null
         } else {
             fromSquare = null
             toSquare = null
+            promotionPiece = null
         }
         invalidate()
     }
@@ -57,28 +69,21 @@ class ChessOverlayView(context: Context) : View(context) {
         super.onDraw(canvas)
         val board = detectedBoardRect ?: return
 
-        // Bù trừ lệch tọa độ status bar của Android
         val loc = IntArray(2)
         getLocationOnScreen(loc)
-        val offsetY = loc[1].toFloat()
         val offsetX = loc[0].toFloat()
+        val offsetY = loc[1].toFloat()
 
         canvas.save()
         canvas.translate(board.left - offsetX, board.top - offsetY)
         val size = board.width()
         val cellSize = size / 8f
 
-        if (showCornerMarkers) {
-            val len = 36f
-            canvas.drawLine(0f, 0f, len, 0f, cornerPaint)
-            canvas.drawLine(0f, 0f, 0f, len, cornerPaint)
-            canvas.drawLine(size - len, 0f, size, 0f, cornerPaint)
-            canvas.drawLine(size, 0f, size, len, cornerPaint)
-            canvas.drawLine(0f, size - len, 0f, size, cornerPaint)
-            canvas.drawLine(0f, size, len, size, cornerPaint)
-            canvas.drawLine(size - len, size, size, size, cornerPaint)
-            canvas.drawLine(size, size - len, size, size, cornerPaint)
-        }
+        val len = 28f
+        canvas.drawLine(0f, 0f, len, 0f, cornerPaint); canvas.drawLine(0f, 0f, 0f, len, cornerPaint)
+        canvas.drawLine(size - len, 0f, size, 0f, cornerPaint); canvas.drawLine(size, 0f, size, len, cornerPaint)
+        canvas.drawLine(0f, size - len, 0f, size, cornerPaint); canvas.drawLine(0f, size, len, size, cornerPaint)
+        canvas.drawLine(size - len, size, size, size, cornerPaint); canvas.drawLine(size, size - len, size, size, cornerPaint)
 
         val fSq = fromSquare
         val tSq = toSquare
@@ -97,6 +102,20 @@ class ChessOverlayView(context: Context) : View(context) {
                 12f, 12f, highlightToPaint
             )
             drawArrowLocal(canvas, startCenter.x, startCenter.y, endCenter.x, endCenter.y)
+
+            // HIỂN THỊ RÕ QUÂN PHONG CẤP (Q, R, B, N) NẾU CÓ
+            promotionPiece?.let { promo ->
+                val label = when (promo) {
+                    'Q' -> "PHONG HẬU (Q)"
+                    'N' -> "PHONG MÃ (N)"
+                    'R' -> "PHONG XE (R)"
+                    'B' -> "PHONG TƯỢNG (B)"
+                    else -> "PHONG $promo"
+                }
+                val badgeRect = RectF(endCenter.x - 120f, endCenter.y - cellSize / 2 - 46f, endCenter.x + 120f, endCenter.y - cellSize / 2 - 4f)
+                canvas.drawRoundRect(badgeRect, 12f, 12f, promoBgPaint)
+                canvas.drawText(label, endCenter.x, badgeRect.centerY() + 11f, promoTextPaint)
+            }
         }
         canvas.restore()
     }
@@ -112,7 +131,7 @@ class ChessOverlayView(context: Context) : View(context) {
     private fun drawArrowLocal(canvas: Canvas, startX: Float, startY: Float, endX: Float, endY: Float) {
         canvas.drawLine(startX, startY, endX, endY, arrowPaint)
         val angle = atan2((endY - startY).toDouble(), (endX - startX).toDouble())
-        val arrowLength = 48f
+        val arrowLength = 46f
         val arrowAngle = Math.toRadians(32.0)
         val x1 = endX - arrowLength * cos(angle - arrowAngle).toFloat()
         val y1 = endY - arrowLength * sin(angle - arrowAngle).toFloat()
