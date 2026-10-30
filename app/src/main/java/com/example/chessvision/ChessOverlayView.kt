@@ -57,7 +57,7 @@ class ChessOverlayView(context: Context) : View(context) {
         super.onDraw(canvas)
         val board = detectedBoardRect ?: return
 
-        // BÙ TRỪ CHÍNH XÁC LỆCH TỌA ĐỘ STATUS BAR CỦA ANDROID
+        // Bù trừ lệch tọa độ status bar của Android
         val loc = IntArray(2)
         getLocationOnScreen(loc)
         val offsetY = loc[1].toFloat()
@@ -68,19 +68,15 @@ class ChessOverlayView(context: Context) : View(context) {
         val size = board.width()
         val cellSize = size / 8f
 
-        // Chỉ vẽ 4 dấu ngoặc nhỏ ở 4 góc ngoài cùng để biết bàn cờ đã bắt chuẩn (Không kẻ lưới che bàn cờ)
+        // Chỉ vẽ 4 dấu ngoặc ở 4 góc để biết bàn cờ đã bắt chuẩn
         if (showCornerMarkers) {
             val len = 36f
-            // Góc trên trái
             canvas.drawLine(0f, 0f, len, 0f, cornerPaint)
             canvas.drawLine(0f, 0f, 0f, len, cornerPaint)
-            // Góc trên phải
             canvas.drawLine(size - len, 0f, size, 0f, cornerPaint)
             canvas.drawLine(size, 0f, size, len, cornerPaint)
-            // Góc dưới trái
             canvas.drawLine(0f, size - len, 0f, size, cornerPaint)
             canvas.drawLine(0f, size, len, size, cornerPaint)
-            // Góc dưới phải
             canvas.drawLine(size - len, size, size, size, cornerPaint)
             canvas.drawLine(size, size - len, size, size, cornerPaint)
         }

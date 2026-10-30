@@ -5,17 +5,18 @@ import android.content.Context
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.ServiceInfo
-import android.graphics.Bitmap
 import android.graphics.Color
 import android.graphics.PixelFormat
 import android.graphics.RectF
 import android.hardware.display.DisplayManager
 import android.hardware.display.VirtualDisplay
+import android.media.Image
 import android.media.ImageReader
 import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.*
 import android.util.DisplayMetrics
+import android.util.Log
 import android.view.Gravity
 import android.view.MotionEvent
 import android.view.View
@@ -27,10 +28,41 @@ import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
 import java.net.URLEncoder
+import java.nio.ByteBuffer
+import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 
+/** Đọc pixel RGBA trực tiếp từ buffer của khung hình (không tạo Bitmap toàn màn hình). */
+class PixelSource(private val buf: ByteBuffer, private val rowStride: Int, private val pixelStride: Int) {
+    fun get(x: Int, y: Int): Int {
+        val o = y * rowStride + x * pixelStride
+        return Color.rgb(buf.get(o).toInt() and 0xFF, buf.get(o + 1).toInt() and 0xFF, buf.get(o + 2).toInt() and 0xFF)
+    }
+}
+
+class CellData(val mask: BooleanArray, val occupied: Boolean, val coreLum: Int)
+
 class OverlayService : Service() {
+
+    companion object {
+        private const val TAG = "ChessVision"
+        private const val GRID = 16                  // mỗi ô lấy mẫu 16x16
+        private const val DEV_THRESHOLD = 64         // ngưỡng lệch màu so với nền ô
+        private const val OCCUPIED_COVERAGE = 0.35f  // tỉ lệ điểm lệch ở vùng giữa ô để coi là có quân
+        private const val MATCH_MAX_DIFF = 70        // sai khác tối đa (trên 256) khi so template
+        private const val ENGINE_TIME_MS = 2500L
+        private const val AUTO_INTERVAL_MS = 1500L
+        private const val PREF_TOP_Y = "SAVED_TOP_Y"
+        private const val TEMPLATE_CHARS = "KQRBNPkqrbnp"
+        private val START_ROWS = arrayOf(
+            "rnbqkbnr", "pppppppp", "11111111", "11111111",
+            "11111111", "11111111", "PPPPPPPP", "RNBQKBNR"
+        )
+    }
 
     private lateinit var windowManager: WindowManager
     private lateinit var chessOverlayView: ChessOverlayView
@@ -43,6 +75,11 @@ class OverlayService : Service() {
     private var mediaProjection: MediaProjection? = null
     private var virtualDisplay: VirtualDisplay? = null
     private var imageReader: ImageReader? = null
+    private lateinit var frameThread: HandlerThread
+    private lateinit var frameHandler: Handler
+    private val imageLock = Any()
+    private var heldImage: Image? = null
+    private val frameSeq = AtomicLong(0)
 
     private var screenWidth = 1080
     private var screenHeight = 2400
@@ -50,38 +87,53 @@ class OverlayService : Service() {
 
     private val mainHandler = Handler(Looper.getMainLooper())
     private val workerExecutor = Executors.newSingleThreadExecutor()
-    private var isAutoMode = false
-    private var isScanning = false
-    private var lastAnalyzedFen = ""
-    private var cachedBoardTopY = -1
+    private val scanning = AtomicBoolean(false)
+    private val pendingManual = AtomicBoolean(false)
 
-    private val learnedShapes = mutableMapOf<Char, BooleanArray>()
+    @Volatile private var destroyed = false
+    @Volatile private var isAutoMode = false
+    @Volatile private var cachedBoardTopY = -1
+    @Volatile private var whiteBottom = true
+    @Volatile private var learnRequested = false
+    @Volatile private var lumThr = 128
 
-    data class CellFeature(
-        val isOccupied: Boolean,
-        val edges: BooleanArray,
-        val coreMedianLum: Int,
-        val edgeCount: Int,
-        val topZoneWidth: Int,
-        val midZoneWidth: Int,
-        val highestEdgeY: Int,
-        val symmetryDiff: Int
-    )
+    // ---- Chỉ đọc/ghi trên worker thread ----
+    private val templates = HashMap<Char, ArrayList<BooleanArray>>()
+    private var pos: Position? = null
+    private var turnAssumed = false
+    private var pendingKey = ""
+    private var confirmedKey = ""
+    private var unexplainedKey = ""
+    private var unexplainedCount = 0
+    private var lastSuggestedFen = ""
+    private val fenCache = HashMap<String, String>()
+    private var failCount = 0
+    private var nextApiAt = 0L
+
+    private val autoRunnable = object : Runnable {
+        override fun run() {
+            if (!isAutoMode || destroyed) return
+            scanAndSuggest(false)
+            mainHandler.postDelayed(this, AUTO_INTERVAL_MS)
+        }
+    }
 
     override fun onBind(intent: Intent?): IBinder? = null
 
     override fun onCreate() {
         super.onCreate()
         prefs = getSharedPreferences("StealthChessPrefs", Context.MODE_PRIVATE)
-        cachedBoardTopY = prefs.getInt("SAVED_TOP_Y", -1)
+        cachedBoardTopY = prefs.getInt(PREF_TOP_Y, -1)
+        loadTemplates()
 
         windowManager = getSystemService(WINDOW_SERVICE) as WindowManager
-        val metrics = DisplayMetrics()
-        @Suppress("DEPRECATION")
-        windowManager.defaultDisplay.getRealMetrics(metrics)
-        screenWidth = metrics.widthPixels
-        screenHeight = metrics.heightPixels
-        screenDensity = metrics.densityDpi
+        val size = readScreenSize()
+        screenWidth = size.first
+        screenHeight = size.second
+        screenDensity = resources.displayMetrics.densityDpi
+
+        frameThread = HandlerThread("ChessFrames").apply { start() }
+        frameHandler = Handler(frameThread.looper)
 
         setupBoardOverlay()
         setupFloatingControls()
@@ -89,6 +141,8 @@ class OverlayService : Service() {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         startForegroundNotification()
+        if (mediaProjection != null) return START_NOT_STICKY // đã chạy, bỏ qua lệnh trùng
+
         val resultCode = intent?.getIntExtra("RESULT_CODE", Activity.RESULT_CANCELED) ?: Activity.RESULT_CANCELED
         val data: Intent? = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             intent?.getParcelableExtra("DATA", Intent::class.java)
@@ -101,22 +155,43 @@ class OverlayService : Service() {
                 val mpManager = getSystemService(MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
                 mediaProjection = mpManager.getMediaProjection(resultCode, data)
                 setupVirtualDisplay()
-                // Tự động định vị bàn cờ ngay khi vừa mở
-                mainHandler.postDelayed({ scanAndSuggestMove() }, 700)
-            } catch (e: Exception) { e.printStackTrace() }
+                mainHandler.postDelayed({ scanAndSuggest(true) }, 800)
+            } catch (e: Exception) {
+                Log.e(TAG, "start projection", e)
+                stopSelf()
+            }
+        } else {
+            stopSelf()
         }
         return START_NOT_STICKY
     }
 
+    // ------------------------------------------------------------------ UI
+
+    private fun readScreenSize(): Pair<Int, Int> {
+        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            val b = windowManager.maximumWindowMetrics.bounds
+            Pair(b.width(), b.height())
+        } else {
+            val m = DisplayMetrics()
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay.getRealMetrics(m)
+            Pair(m.widthPixels, m.heightPixels)
+        }
+    }
+
     private fun setupBoardOverlay() {
         chessOverlayView = ChessOverlayView(this)
+        chessOverlayView.isWhiteBottom = whiteBottom
         if (cachedBoardTopY > 0) {
-            chessOverlayView.detectedBoardRect = RectF(0f, cachedBoardTopY.toFloat(), screenWidth.toFloat(), (cachedBoardTopY + screenWidth).toFloat())
+            chessOverlayView.detectedBoardRect =
+                RectF(0f, cachedBoardTopY.toFloat(), screenWidth.toFloat(), (cachedBoardTopY + screenWidth).toFloat())
         }
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
-            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
+            WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE or WindowManager.LayoutParams.FLAG_NOT_TOUCHABLE or
+                    WindowManager.LayoutParams.FLAG_LAYOUT_IN_SCREEN,
             PixelFormat.TRANSLUCENT
         )
         windowManager.addView(chessOverlayView, params)
@@ -129,56 +204,73 @@ class OverlayService : Service() {
             setPadding(14, 8, 14, 8)
         }
         tvStatus = TextView(this).apply {
-            text = "Stealth v5.2 • Đang tự động khóa vị trí bàn cờ..."
+            text = if (templatesReady()) "Sẵn sàng • bấm ⚡ để quét"
+            else "Chưa học quân: mở ván mới (thế khởi đầu) rồi bấm 📚"
             setTextColor(Color.parseColor("#69F0AE"))
             textSize = 11f
+            maxWidth = (screenWidth * 0.9f).toInt()
+            maxLines = 3
         }
 
-        val row = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, 4, 0, 0) }
+        val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, 4, 0, 0) }
+        val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(0, 2, 0, 0) }
 
-        btnSide = createButton("⚪ Trắng") {
-            chessOverlayView.isWhiteBottom = !chessOverlayView.isWhiteBottom
-            btnSide.text = if (chessOverlayView.isWhiteBottom) "⚪ Trắng" else "⚫ Đen"
-            lastAnalyzedFen = ""
+        btnSide = createButton(if (whiteBottom) "⚪ Trắng" else "⚫ Đen") {
+            whiteBottom = !whiteBottom
+            prefs.edit().putBoolean("WHITE_BOTTOM", whiteBottom).apply()
+            chessOverlayView.isWhiteBottom = whiteBottom
+            btnSide.text = if (whiteBottom) "⚪ Trắng" else "⚫ Đen"
             chessOverlayView.setMove(null)
-            scanAndSuggestMove()
+            runOnWorker { resetGameState() }
+            scanAndSuggest(true)
         }
 
         val btnAuto = createButton("▶ Auto") { btn ->
             isAutoMode = !isAutoMode
+            mainHandler.removeCallbacks(autoRunnable)
             if (isAutoMode) {
                 btn.text = "⏸ Auto"
-                lastAnalyzedFen = ""
-                runAutoLoop()
+                mainHandler.post(autoRunnable)
             } else {
                 btn.text = "▶ Auto"
-                chessOverlayView.setMove(null)
                 tvStatus.text = "Đã dừng Auto."
             }
         }
 
-        val btnScanOnce = createButton("⚡ Quét") {
-            lastAnalyzedFen = ""
-            scanAndSuggestMove()
+        val btnScan = createButton("⚡ Quét") { scanAndSuggest(true) }
+
+        val btnTurn = createButton("🔁 Lượt") {
+            runOnWorker {
+                pos?.let { pos = Position(it.b, !it.whiteToMove, it.castle, "-") }
+                turnAssumed = false
+                lastSuggestedFen = ""
+            }
+            scanAndSuggest(true)
         }
 
-        // 2 nút tinh chỉnh nhẹ nếu 4 dấu góc [ ] lệch khỏi bàn cờ (Lưu vĩnh viễn)
-        val btnUp = createButton("▲") {
-            if (cachedBoardTopY < 0) cachedBoardTopY = (screenHeight - screenWidth) / 2
-            cachedBoardTopY = (cachedBoardTopY - 12).coerceAtLeast(50)
-            saveTopY()
+        val btnLearn = createButton("📚 Học") {
+            learnRequested = true
+            tvStatus.text = "Đang học bộ quân từ thế khởi đầu..."
+            scanAndSuggest(true)
         }
-        val btnDown = createButton("▼") {
-            if (cachedBoardTopY < 0) cachedBoardTopY = (screenHeight - screenWidth) / 2
-            cachedBoardTopY = (cachedBoardTopY + 12).coerceAtMost(screenHeight - screenWidth - 20)
-            saveTopY()
+
+        val btnUp = createButton("▲") { moveBoard(-12) }
+        val btnDown = createButton("▼") { moveBoard(12) }
+
+        val btnReset = createButton("⟲") {
+            cachedBoardTopY = -1
+            prefs.edit().remove(PREF_TOP_Y).apply()
+            runOnWorker { resetGameState() }
+            tvStatus.text = "Đang dò lại vị trí bàn cờ..."
+            scanAndSuggest(true)
         }
 
         val btnClose = createButton("✕") { stopSelf() }
 
-        row.addView(btnSide); row.addView(btnAuto); row.addView(btnScanOnce)
-        row.addView(btnUp); row.addView(btnDown); row.addView(btnClose)
-        controlLayout.addView(tvStatus); controlLayout.addView(row)
+        row1.addView(btnSide); row1.addView(btnAuto); row1.addView(btnScan); row1.addView(btnTurn)
+        row2.addView(btnLearn); row2.addView(btnUp); row2.addView(btnDown)
+        row2.addView(btnReset); row2.addView(btnClose)
+        controlLayout.addView(tvStatus); controlLayout.addView(row1); controlLayout.addView(row2)
 
         controlParams = WindowManager.LayoutParams(
             WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT,
@@ -206,17 +298,7 @@ class OverlayService : Service() {
                 else -> false
             }
         }
-
         windowManager.addView(controlLayout, controlParams)
-    }
-
-    private fun saveTopY() {
-        prefs.edit().putInt("SAVED_TOP_Y", cachedBoardTopY).apply()
-        chessOverlayView.detectedBoardRect = RectF(0f, cachedBoardTopY.toFloat(), screenWidth.toFloat(), (cachedBoardTopY + screenWidth).toFloat())
-        chessOverlayView.invalidate()
-        lastAnalyzedFen = ""
-        tvStatus.text = "Đã lưu vị trí Y=$cachedBoardTopY • Đang quét lại..."
-        scanAndSuggestMove()
     }
 
     private fun createButton(label: String, onClick: (Button) -> Unit): Button {
@@ -227,468 +309,563 @@ class OverlayService : Service() {
         }
     }
 
+    private fun moveBoard(delta: Int) {
+        val maxY = (screenHeight - screenWidth - 4).coerceAtLeast(0)
+        if (cachedBoardTopY < 0) cachedBoardTopY = (screenHeight - screenWidth) / 2
+        cachedBoardTopY = (cachedBoardTopY + delta).coerceIn(0, maxY)
+        prefs.edit().putInt(PREF_TOP_Y, cachedBoardTopY).apply()
+        chessOverlayView.detectedBoardRect =
+            RectF(0f, cachedBoardTopY.toFloat(), screenWidth.toFloat(), (cachedBoardTopY + screenWidth).toFloat())
+        chessOverlayView.invalidate()
+        tvStatus.text = "Đã lưu Y=$cachedBoardTopY • đang quét lại..."
+        scanAndSuggest(true)
+    }
+
+    private fun setStatus(s: String) {
+        mainHandler.post { if (!destroyed) tvStatus.text = s }
+    }
+
+    private fun runOnWorker(block: () -> Unit) {
+        if (destroyed) return
+        try { workerExecutor.execute { block() } } catch (e: Exception) { /* service đang tắt */ }
+    }
+
+    // ------------------------------------------------------------ Chụp màn hình
+
     private fun setupVirtualDisplay() {
         mediaProjection?.registerCallback(object : MediaProjection.Callback() {
-            override fun onStop() { virtualDisplay?.release(); mediaProjection = null }
+            override fun onStop() {
+                if (!destroyed) mainHandler.post { stopSelf() }
+            }
         }, mainHandler)
-        imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2)
+
+        val reader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 3)
+        // Luôn rút khung mới nhất để hàng đợi buffer không bị tắc; giữ lại 1 khung để đọc khi cần.
+        reader.setOnImageAvailableListener({ r ->
+            val img = try { r.acquireLatestImage() } catch (e: Exception) { null }
+            if (img != null) {
+                synchronized(imageLock) {
+                    heldImage?.close()
+                    heldImage = img
+                }
+                frameSeq.incrementAndGet()
+            }
+        }, frameHandler)
+        imageReader = reader
         virtualDisplay = mediaProjection?.createVirtualDisplay(
             "ChessScreenCapture", screenWidth, screenHeight, screenDensity,
-            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader?.surface, null, null
+            DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, reader.surface, null, null
         )
     }
 
-    // THUẬT TOÁN TÌM CHÍNH XÁC Mép BÀN CỜ QUA 7 ĐƯỜNG RANH GIỚI CỘT + ĐỘ ĐỒNG NHẤT MÀU Ô
-    private fun findChessboardTopY(fullBmp: Bitmap): Int {
-        val w = screenWidth
-        val h = screenHeight
-        val cellSize = w / 8f
-        val searchStart = (h * 0.22f).toInt()
-        val searchEnd = (h * 0.46f).toInt().coerceAtMost(h - w - 10)
+    private fun lum(p: Int) = (Color.red(p) * 299 + Color.green(p) * 587 + Color.blue(p) * 114) / 1000
 
-        var bestTopY = (h * 0.318f).toInt()
-        var maxBoardScore = Int.MIN_VALUE
+    /** Ẩn lớp phủ (mũi tên, góc xanh) trước khi chụp. Bảng điều khiển chỉ ẩn nếu chồng lên bàn cờ. */
+    private fun setOverlaysVisible(visible: Boolean) {
+        val latch = CountDownLatch(1)
+        mainHandler.post {
+            try {
+                if (!destroyed) {
+                    chessOverlayView.visibility = if (visible) View.VISIBLE else View.INVISIBLE
+                    if (visible) controlLayout.visibility = View.VISIBLE
+                    else if (controlOverlapsBoard()) controlLayout.visibility = View.INVISIBLE
+                }
+            } finally {
+                latch.countDown()
+            }
+        }
+        latch.await(500, TimeUnit.MILLISECONDS)
+    }
 
-        for (candidateY in searchStart..searchEnd step 4) {
-            var score = 0
+    private fun controlOverlapsBoard(): Boolean {
+        val top = cachedBoardTopY
+        if (top < 0) return true
+        val loc = IntArray(2)
+        controlLayout.getLocationOnScreen(loc)
+        val cTop = loc[1]
+        val cBottom = cTop + controlLayout.height
+        return cBottom > top && cTop < top + screenWidth
+    }
+
+    /** Chấm điểm mẫu ô sáng/tối trên cả 64 ô; lấy giữa vùng điểm cao nhất. Trả -1 nếu không chắc. */
+    private fun findChessboardTopY(src: PixelSource): Int {
+        val w = screenWidth; val h = screenHeight
+        val cs = w / 8f
+        val offs = IntArray(8) { (it * cs + cs * 0.12f).toInt().coerceIn(0, w - 1) }
+        val l = IntArray(64)
+        var bestScore = -1
+        val bestYs = ArrayList<Int>()
+        for (top in 0..(h - w) step 2) {
             for (r in 0..7) {
-                // Lấy điểm ở góc trên mỗi ô (tránh vùng bụng quân cờ)
-                val y = (candidateY + r * cellSize + cellSize * 0.14f).toInt()
-                if (y >= h) continue
-                var evenSum = 0; var oddSum = 0
-                for (c in 0..7) {
-                    val x = (c * cellSize + cellSize * 0.14f).toInt().coerceIn(0, w - 1)
-                    val p = fullBmp.getPixel(x, y)
-                    val lum = (Color.red(p) * 299 + Color.green(p) * 587 + Color.blue(p) * 114) / 1000
-                    if ((r + c) % 2 == 0) evenSum += lum else oddSum += lum
-                }
-                val avgEven = evenSum / 4
-                val avgOdd = oddSum / 4
-                val contrast = abs(avgEven - avgOdd)
-                // Bàn cờ thực sự có độ chênh màu giữa ô chẵn và ô lẻ từ 14 đến 160 đơn vị trên cả 8 hàng
-                if (contrast in 14..160) score += 25 else score -= 20
+                val y = (top + r * cs + cs * 0.12f).toInt().coerceIn(0, h - 1)
+                for (c in 0..7) l[r * 8 + c] = lum(src.get(offs[c], y))
             }
-            if (score > maxBoardScore) {
-                maxBoardScore = score
-                bestTopY = candidateY
+            var se = 0; var so = 0
+            for (i in 0 until 64) if (((i / 8) + (i % 8)) % 2 == 0) se += l[i] else so += l[i]
+            val me = se / 32; val mo = so / 32
+            if (abs(me - mo) < 12) continue
+            val mid = (me + mo) / 2
+            val evenBright = me > mo
+            var ok = 0
+            for (i in 0 until 64) {
+                val even = ((i / 8) + (i % 8)) % 2 == 0
+                val bright = l[i] > mid
+                if (bright == (even == evenBright)) ok++
             }
+            if (ok > bestScore) { bestScore = ok; bestYs.clear(); bestYs.add(top) }
+            else if (ok == bestScore) bestYs.add(top)
         }
-        return bestTopY
+        return if (bestScore >= 56 && bestYs.isNotEmpty()) bestYs[bestYs.size / 2] else -1
     }
 
-    private fun captureCleanBoard(): Bitmap? {
-        val reader = imageReader ?: return null
-        val image = try { reader.acquireLatestImage() } catch (e: Exception) { null } ?: return null
-        return try {
-            val planes = image.planes
-            val buffer = planes[0].buffer
-            val pixelStride = planes[0].pixelStride
-            val rowStride = planes[0].rowStride
-            val rowPadding = rowStride - pixelStride * screenWidth
-            val fullBmp = Bitmap.createBitmap(screenWidth + rowPadding / pixelStride, screenHeight, Bitmap.Config.ARGB_8888)
-            fullBmp.copyPixelsFromBuffer(buffer)
-
-            val w = screenWidth
-            val h = screenHeight
-
-            if (cachedBoardTopY < 0) {
-                cachedBoardTopY = findChessboardTopY(fullBmp)
-                prefs.edit().putInt("SAVED_TOP_Y", cachedBoardTopY).apply()
+    /** Chụp vùng bàn cờ thành mảng pixel vuông (cạnh = screenWidth). Gọi trên worker thread. */
+    private fun captureBoard(): IntArray? {
+        setOverlaysVisible(false)
+        try {
+            // Chờ khung hình MỚI (sau khi ẩn lớp phủ) để không đọc nhầm khung cũ còn mũi tên.
+            val seq0 = frameSeq.get()
+            Thread.sleep(70)
+            if (frameSeq.get() == seq0) {
+                val end = SystemClock.elapsedRealtime() + 300
+                while (frameSeq.get() == seq0 && SystemClock.elapsedRealtime() < end) Thread.sleep(15)
             }
-            val topY = cachedBoardTopY.coerceIn(0, h - w)
+            synchronized(imageLock) {
+                val img = heldImage
+                if (img == null) { setStatus("Chưa nhận được khung hình, thử lại"); return null }
+                if (img.width != screenWidth || img.height != screenHeight) {
+                    setStatus("Kích thước màn hình đã đổi • đóng và mở lại app"); return null
+                }
+                val plane = img.planes[0]
+                val src = PixelSource(plane.buffer, plane.rowStride, plane.pixelStride)
 
-            val rect = RectF(0f, topY.toFloat(), w.toFloat(), (topY + w).toFloat())
-            mainHandler.post {
-                chessOverlayView.detectedBoardRect = rect
-                chessOverlayView.invalidate()
+                if (cachedBoardTopY < 0) {
+                    val found = findChessboardTopY(src)
+                    cachedBoardTopY = if (found >= 0) found else (screenHeight - screenWidth) / 2
+                    prefs.edit().putInt(PREF_TOP_Y, cachedBoardTopY).apply()
+                    if (found < 0) setStatus("Không tự dò được bàn cờ • chỉnh ▲/▼ cho khớp 4 góc xanh")
+                }
+                val topY = cachedBoardTopY.coerceIn(0, screenHeight - screenWidth)
+                val rect = RectF(0f, topY.toFloat(), screenWidth.toFloat(), (topY + screenWidth).toFloat())
+                mainHandler.post { chessOverlayView.detectedBoardRect = rect; chessOverlayView.invalidate() }
+
+                val n = screenWidth
+                val px = IntArray(n * n)
+                for (y in 0 until n) {
+                    val base = y * n
+                    for (x in 0 until n) px[base + x] = src.get(x, topY + y)
+                }
+                return px
             }
-
-            val cropped = Bitmap.createBitmap(fullBmp, 0, topY, w, w)
-            fullBmp.recycle()
-            cropped
-        } catch (e: Exception) {
-            null
         } finally {
-            image.close()
+            setOverlaysVisible(true)
         }
     }
 
-    private fun analyzeCell(cell: Bitmap): CellFeature {
-        val scaled = Bitmap.createScaledBitmap(cell, 32, 32, true)
-        val w = 32; val h = 32
-        val pixels = IntArray(w * h)
-        scaled.getPixels(pixels, 0, w, 0, 0, w, h)
-        scaled.recycle()
+    // ------------------------------------------------------- Đọc bàn cờ từ ảnh
 
-        val gray = IntArray(w * h)
-        for (i in pixels.indices) {
-            val p = pixels[i]
-            gray[i] = (Color.red(p) * 299 + Color.green(p) * 587 + Color.blue(p) * 114) / 1000
-        }
-
-        val edges = BooleanArray(w * h)
-        var edgeCount = 0
-        var highestEdgeY = 32
-        var topMinX = 32; var topMaxX = 0
-        var midMinX = 32; var midMaxX = 0
-        var symmetryDiff = 0
-
-        for (y in 4 until h - 4) {
-            for (x in 4 until w - 4) {
-                val idx = y * w + x
-                val gx = abs(gray[idx + 1] - gray[idx - 1])
-                val gy = abs(gray[idx + w] - gray[idx - w])
-                val grad = gx + gy
-
-                if (grad > 26) {
-                    edges[idx] = true
-                    edgeCount++
-                    if (y < highestEdgeY) highestEdgeY = y
-                    if (y in 5..12) {
-                        if (x < topMinX) topMinX = x
-                        if (x > topMaxX) topMaxX = x
-                    }
-                    if (y in 13..20) {
-                        if (x < midMinX) midMinX = x
-                        if (x > midMaxX) midMaxX = x
-                    }
-                }
-                if (x in 7..15) {
-                    val mirrorIdx = y * w + (31 - x)
-                    symmetryDiff += abs(gray[idx] - gray[mirrorIdx])
-                }
+    /** Màu nền ô: trung vị 4 mảng ở mép ô (chịu được ô tô sáng nước vừa đi và chữ tọa độ). */
+    private fun estimateBackground(px: IntArray, n: Int, x0: Float, y0: Float, cs: Float): IntArray {
+        val spots = arrayOf(
+            floatArrayOf(0.04f, 0.04f), floatArrayOf(0.88f, 0.04f),
+            floatArrayOf(0.03f, 0.45f), floatArrayOf(0.89f, 0.45f)
+        )
+        val rs = IntArray(4); val gs = IntArray(4); val bs = IntArray(4)
+        for ((k, s) in spots.withIndex()) {
+            var sr = 0; var sg = 0; var sb = 0
+            for (j in 0 until 4) for (i in 0 until 4) {
+                val x = (x0 + (s[0] + i * 0.02f) * cs).toInt().coerceIn(0, n - 1)
+                val y = (y0 + (s[1] + j * 0.02f) * cs).toInt().coerceIn(0, n - 1)
+                val p = px[y * n + x]
+                sr += Color.red(p); sg += Color.green(p); sb += Color.blue(p)
             }
+            rs[k] = sr / 16; gs[k] = sg / 16; bs[k] = sb / 16
         }
-
-        // LẤY ĐỘ SÁNG TRUNG VỊ (MEDIAN) VÙNG LÕI BỤNG QUÂN CỜ ĐỂ TÁCH BIỆT TUYỆT ĐỐI TRẮNG & ĐEN
-        val coreLums = IntArray(81)
-        var k = 0
-        for (y in 14..22) {
-            for (x in 12..20) {
-                coreLums[k++] = gray[y * w + x]
-            }
-        }
-        coreLums.sort()
-        val coreMedianLum = coreLums[40]
-
-        val topWidth = if (topMaxX >= topMinX) topMaxX - topMinX else 0
-        val midWidth = if (midMaxX >= midMinX) midMaxX - midMinX else 0
-        val isOccupied = edgeCount >= 22
-
-        return CellFeature(isOccupied, edges, coreMedianLum, edgeCount, topWidth, midWidth, highestEdgeY, symmetryDiff)
+        rs.sort(); gs.sort(); bs.sort()
+        return intArrayOf((rs[1] + rs[2]) / 2, (gs[1] + gs[2]) / 2, (bs[1] + bs[2]) / 2)
     }
 
-    private fun scanAndSuggestMove() {
-        if (isScanning) return
-        isScanning = true
-
-        chessOverlayView.visibility = View.INVISIBLE
-        mainHandler.postDelayed({
-            val boardBmp = captureCleanBoard()
-            chessOverlayView.visibility = View.VISIBLE
-            if (boardBmp == null) {
-                isScanning = false
-                return@postDelayed
-            }
-
-            workerExecutor.execute {
-                try {
-                    val cellSize = boardBmp.width / 8f
-                    val occupiedLums = mutableListOf<Int>()
-
-                    val features = Array(8) { r ->
-                        Array(8) { c ->
-                            val x = (c * cellSize).toInt().coerceIn(0, boardBmp.width - 4)
-                            val y = (r * cellSize).toInt().coerceIn(0, boardBmp.height - 4)
-                            val size = cellSize.toInt().coerceIn(4, boardBmp.width - x).coerceAtMost(boardBmp.height - y)
-                            val cellBmp = Bitmap.createBitmap(boardBmp, x, y, size, size)
-                            val feat = analyzeCell(cellBmp)
-                            cellBmp.recycle()
-                            if (feat.isOccupied) occupiedLums.add(feat.coreMedianLum)
-                            feat
-                        }
-                    }
-                    boardBmp.recycle()
-
-                    if (occupiedLums.size < 2) {
-                        mainHandler.post { tvStatus.text = "Chưa thấy quân cờ! Kiểm tra 4 góc xanh [ ]" }
-                        isScanning = false
-                        return@execute
-                    }
-
-                    occupiedLums.sort()
-                    val minLum = occupiedLums.first()
-                    val maxLum = occupiedLums.last()
-                    val lumThreshold = (minLum + maxLum) / 2
-
-                    var topRankFull = true
-                    var botRankFull = true
-                    for (c in 0..7) {
-                        if (!features[0][c].isOccupied) topRankFull = false
-                        if (!features[7][c].isOccupied) botRankFull = false
-                    }
-
-                    if (topRankFull && botRankFull && learnedShapes.isEmpty()) {
-                        val isWhiteBot = features[7][4].coreMedianLum > features[0][4].coreMedianLum
-                        val order = if (isWhiteBot) charArrayOf('R', 'N', 'B', 'Q', 'K', 'B', 'N', 'R')
-                                    else charArrayOf('R', 'N', 'B', 'K', 'Q', 'B', 'N', 'R')
-                        for (c in 0..7) learnedShapes[order[c]] = features[7][c].edges
-                        if (features[6][4].isOccupied) learnedShapes['P'] = features[6][4].edges
-                        else if (features[6][0].isOccupied) learnedShapes['P'] = features[6][0].edges
-
-                        mainHandler.post {
-                            chessOverlayView.isWhiteBottom = isWhiteBot
-                            btnSide.text = if (isWhiteBot) "⚪ Trắng" else "⚫ Đen"
-                        }
-                    }
-
-                    val rawMatrix = Array(8) { CharArray(8) { '1' } }
-                    for (r in 0..7) {
-                        for (c in 0..7) {
-                            val f = features[r][c]
-                            if (!f.isOccupied) continue
-                            val isWhite = f.coreMedianLum >= lumThreshold
-                            val pieceChar = classifyPiece3Tier(r, c, f)
-                            rawMatrix[r][c] = if (isWhite) pieceChar.uppercaseChar() else pieceChar.lowercaseChar()
-                        }
-                    }
-
-                    val standardMatrix = if (chessOverlayView.isWhiteBottom) rawMatrix
-                                         else Array(8) { r -> CharArray(8) { c -> rawMatrix[7 - r][7 - c] } }
-
-                    val standardFeatures = if (chessOverlayView.isWhiteBottom) features
-                                           else Array(8) { r -> Array(8) { c -> features[7 - r][7 - c] } }
-
-                    sanitizeLogicalBoard(standardMatrix, standardFeatures)
-
-                    var castling = ""
-                    if (standardMatrix[7][4] == 'K') {
-                        if (standardMatrix[7][7] == 'R') castling += "K"
-                        if (standardMatrix[7][0] == 'R') castling += "Q"
-                    }
-                    if (standardMatrix[0][4] == 'k') {
-                        if (standardMatrix[0][7] == 'r') castling += "k"
-                        if (standardMatrix[0][0] == 'r') castling += "q"
-                    }
-                    if (castling.isEmpty()) castling = "-"
-
-                    val boardPart = buildFenBoard(standardMatrix)
-                    if (boardPart == lastAnalyzedFen) {
-                        isScanning = false
-                        return@execute
-                    }
-
-                    val sideToMove = if (chessOverlayView.isWhiteBottom) "w" else "b"
-                    val primaryFen = "$boardPart $sideToMove $castling - 0 1"
-
-                    // Thử gọi Stockfish với FEN chính, nếu thế cờ đọc hơi nhiễu bị từ chối thì dùng FEN an toàn dự phòng
-                    var move = fetchStockfishWithFallback(primaryFen)
-                    if (move == null) {
-                        val safeMatrix = Array(8) { r -> standardMatrix[r].clone() }
-                        val safeBoard = buildSafeFallbackFen(safeMatrix)
-                        move = fetchStockfishWithFallback("$safeBoard $sideToMove - - 0 1")
-                    }
-
-                    mainHandler.post {
-                        if (move != null && move.length >= 4) {
-                            lastAnalyzedFen = boardPart
-                            chessOverlayView.setMove(move)
-                            tvStatus.text = "✅ Đi: ${move.substring(0, 2).uppercase()} ➔ ${move.substring(2, 4).uppercase()} (${occupiedLums.size} quân)"
-                        } else {
-                            tvStatus.text = "Chưa có nước đi (${occupiedLums.size} quân) • Chỉnh ▲/▼ nếu lệch góc"
-                        }
-                        isScanning = false
-                    }
-                } catch (e: Exception) {
-                    mainHandler.post { tvStatus.text = "Lỗi: ${e.message}"; isScanning = false }
+    private fun readCells(px: IntArray, n: Int): Array<Array<CellData>> {
+        val cs = n / 8f
+        return Array(8) { r ->
+            Array(8) { c ->
+                val x0 = c * cs; val y0 = r * cs
+                val bg = estimateBackground(px, n, x0, y0, cs)
+                val mask = BooleanArray(GRID * GRID)
+                var centerDev = 0
+                val lums = IntArray(16); var li = 0
+                for (gy in 0 until GRID) for (gx in 0 until GRID) {
+                    val x = (x0 + (gx + 0.5f) * cs / GRID).toInt().coerceIn(0, n - 1)
+                    val y = (y0 + (gy + 0.5f) * cs / GRID).toInt().coerceIn(0, n - 1)
+                    val p = px[y * n + x]
+                    val dev = abs(Color.red(p) - bg[0]) + abs(Color.green(p) - bg[1]) +
+                            abs(Color.blue(p) - bg[2]) > DEV_THRESHOLD
+                    mask[gy * GRID + gx] = dev
+                    if (dev && gx in 4..11 && gy in 4..11) centerDev++
+                    if (gx in 6..9 && gy in 6..9) lums[li++] = lum(p)
                 }
+                lums.sort()
+                CellData(mask, centerDev / 64f >= OCCUPIED_COVERAGE, lums[8])
             }
-        }, 80)
-    }
-
-    private fun buildFenBoard(matrix: Array<CharArray>): String {
-        val fenRows = mutableListOf<String>()
-        for (r in 0..7) {
-            var empty = 0
-            val sb = StringBuilder()
-            for (c in 0..7) {
-                if (matrix[r][c] == '1') empty++
-                else {
-                    if (empty > 0) { sb.append(empty); empty = 0 }
-                    sb.append(matrix[r][c])
-                }
-            }
-            if (empty > 0) sb.append(empty)
-            fenRows.add(sb.toString())
         }
-        return fenRows.joinToString("/")
     }
 
-    // Nếu 2 Vua vô tình bị nhận diện đứng sát nhau (bất hợp lệ trong cờ vua), tự động tách ra để Stockfish luôn chạy
-    private fun buildSafeFallbackFen(matrix: Array<CharArray>): String {
-        var wkR = 7; var wkC = 4; var bkR = 0; var bkC = 4
+    private fun classify(cell: CellData, white: Boolean): Char {
+        var best = '?'; var bestDiff = Int.MAX_VALUE
+        for (t in "KQRBNP") {
+            val ch = if (white) t else t.lowercaseChar()
+            val list = templates[ch] ?: continue
+            for (tpl in list) {
+                var d = 0
+                for (i in tpl.indices) if (cell.mask[i] != tpl[i]) d++
+                if (d < bestDiff) { bestDiff = d; best = ch }
+            }
+        }
+        return if (bestDiff <= MATCH_MAX_DIFF) best else '?'
+    }
+
+    // ------------------------------------------------------------ Học template
+
+    private fun templatesReady(): Boolean = TEMPLATE_CHARS.all { templates[it]?.isNotEmpty() == true }
+
+    private fun loadTemplates() {
+        for (ch in TEMPLATE_CHARS) {
+            val s = prefs.getString("TPL_${ch.code}", null) ?: continue
+            val list = ArrayList<BooleanArray>()
+            for (part in s.split(",")) {
+                if (part.length == GRID * GRID) list.add(BooleanArray(part.length) { part[it] == '1' })
+            }
+            if (list.isNotEmpty()) templates[ch] = list
+        }
+        lumThr = prefs.getInt("LUM_THR", 128)
+        whiteBottom = prefs.getBoolean("WHITE_BOTTOM", true)
+    }
+
+    private fun learnTemplates(cells: Array<Array<CellData>>) {
         for (r in 0..7) for (c in 0..7) {
-            if (matrix[r][c] == 'K') { wkR = r; wkC = c }
-            if (matrix[r][c] == 'k') { bkR = r; bkC = c }
-        }
-        if (abs(wkR - bkR) <= 1 && abs(wkC - bkC) <= 1) {
-            matrix[bkR][bkC] = 'q'
-            matrix[0][4] = 'k'
-        }
-        return buildFenBoard(matrix)
-    }
-
-    private fun classifyPiece3Tier(r: Int, c: Int, f: CellFeature): Char {
-        if (learnedShapes.isNotEmpty()) {
-            var bestP = 'P'
-            var minDiff = Int.MAX_VALUE
-            for ((pChar, tpl) in learnedShapes) {
-                if (pChar == 'P' && (r == 0 || r == 7)) continue
-                var diff = 0
-                for (i in 0 until 1024) {
-                    if (f.edges[i] != tpl[i]) diff++
-                }
-                if (diff < minDiff) {
-                    minDiff = diff
-                    bestP = pChar
-                }
-            }
-            if (minDiff < 175) return bestP
-        }
-
-        if (f.symmetryDiff > 2800) return 'N'
-        if (r != 0 && r != 7 && f.highestEdgeY >= 9 && f.topZoneWidth <= 11 && f.edgeCount < 70) return 'P'
-        if (f.highestEdgeY <= 6 && f.topZoneWidth >= 14) return 'Q'
-        if (f.highestEdgeY <= 6 && f.topZoneWidth in 8..13) return 'K'
-        if (f.topZoneWidth >= 12 && abs(f.topZoneWidth - f.midZoneWidth) <= 3) return 'R'
-        if (f.highestEdgeY <= 8 && f.topZoneWidth < f.midZoneWidth) return 'B'
-        return if (r == 0 || r == 7) 'R' else 'P'
-    }
-
-    private fun sanitizeLogicalBoard(matrix: Array<CharArray>, feats: Array<Array<CellFeature>>) {
-        for (c in 0..7) {
-            if (matrix[0][c] == 'P') matrix[0][c] = 'Q'
-            if (matrix[0][c] == 'p') matrix[0][c] = 'r'
-            if (matrix[7][c] == 'P') matrix[7][c] = 'R'
-            if (matrix[7][c] == 'p') matrix[7][c] = 'q'
-        }
-        assignLogicalKing(matrix, feats, isWhite = true)
-        assignLogicalKing(matrix, feats, isWhite = false)
-    }
-
-    private fun assignLogicalKing(matrix: Array<CharArray>, feats: Array<Array<CellFeature>>, isWhite: Boolean) {
-        val kingChar = if (isWhite) 'K' else 'k'
-        val queenChar = if (isWhite) 'Q' else 'q'
-        val candidates = mutableListOf<Pair<Int, Int>>()
-
-        for (r in 0..7) {
-            for (c in 0..7) {
-                if (matrix[r][c] == kingChar) candidates.add(Pair(r, c))
+            if (cells[r][c].occupied != (r <= 1 || r >= 6)) {
+                setStatus("Chưa phải thế khởi đầu (hoặc bàn cờ lệch). Mở ván mới, chỉnh ▲▼ rồi bấm 📚")
+                return
             }
         }
-
-        if (candidates.size == 1) return
-
-        if (candidates.size > 1) {
-            candidates.sortBy { (r, _) -> if (isWhite) 7 - r else r }
-            for (i in 1 until candidates.size) {
-                val (r, c) = candidates[i]
-                matrix[r][c] = queenChar
-            }
+        val topLum = (0..1).flatMap { r -> (0..7).map { cells[r][it].coreLum } }.average()
+        val botLum = (6..7).flatMap { r -> (0..7).map { cells[r][it].coreLum } }.average()
+        if (abs(botLum - topLum) < 40) {
+            setStatus("Không phân biệt được màu quân Trắng/Đen (độ tương phản thấp)")
             return
         }
+        val wb = botLum > topLum
+        lumThr = ((botLum + topLum) / 2).toInt()
+        val order = if (wb) "RNBQKBNR" else "RNBKQBNR"
+        fun botCase(ch: Char) = if (wb) ch else ch.lowercaseChar()
+        fun topCase(ch: Char) = if (wb) ch.lowercaseChar() else ch
 
-        var bestR = -1; var bestC = -1; var bestScore = -999
-        for (r in 0..7) {
-            for (c in 0..7) {
-                val ch = matrix[r][c]
-                if (ch != '1' && ch.isUpperCase() == isWhite) {
-                    val f = feats[r][c]
-                    val rankBonus = if (isWhite) (if (r == 7) 35 else 0) else (if (r == 0) 35 else 0)
-                    val score = (32 - f.highestEdgeY) * 3 + f.edgeCount + rankBonus
-                    if (score > bestScore) {
-                        bestScore = score
-                        bestR = r; bestC = c
-                    }
+        templates.clear()
+        fun addTpl(ch: Char, m: BooleanArray) { templates.getOrPut(ch) { ArrayList() }.add(m) }
+        for (c in 0..7) {
+            addTpl(botCase(order[c]), cells[7][c].mask)
+            addTpl(topCase(order[c]), cells[0][c].mask)
+            addTpl(botCase('P'), cells[6][c].mask)
+            addTpl(topCase('P'), cells[1][c].mask)
+        }
+
+        val ed = prefs.edit()
+        for ((ch, list) in templates) {
+            ed.putString("TPL_${ch.code}", list.joinToString(",") { m -> m.joinToString("") { if (it) "1" else "0" } })
+        }
+        ed.putInt("LUM_THR", lumThr).putBoolean("WHITE_BOTTOM", wb).apply()
+
+        whiteBottom = wb
+        resetGameState()
+        mainHandler.post {
+            chessOverlayView.isWhiteBottom = wb
+            btnSide.text = if (wb) "⚪ Trắng" else "⚫ Đen"
+            chessOverlayView.setMove(null)
+            tvStatus.text = "✅ Đã học ${templates.size} loại quân • bạn cầm ${if (wb) "Trắng" else "Đen"}"
+            mainHandler.postDelayed({ scanAndSuggest(true) }, 600)
+        }
+    }
+
+    private fun resetGameState() {
+        pos = null; turnAssumed = false
+        pendingKey = ""; confirmedKey = ""
+        unexplainedKey = ""; unexplainedCount = 0
+        lastSuggestedFen = ""
+    }
+
+    // ---------------------------------------------------------------- Quét chính
+
+    private fun scanAndSuggest(manual: Boolean) {
+        if (destroyed) return
+        if (!scanning.compareAndSet(false, true)) {
+            if (manual) pendingManual.set(true) // đang quét dở: xếp hàng quét lại ngay khi xong
+            return
+        }
+        try {
+            workerExecutor.execute {
+                try {
+                    doScan(manual)
+                } catch (e: Exception) {
+                    Log.e(TAG, "scan", e)
+                    setStatus("Lỗi: ${e.message}")
+                } finally {
+                    scanning.set(false)
+                    if (pendingManual.getAndSet(false)) mainHandler.post { scanAndSuggest(true) }
                 }
             }
-        }
-        if (bestR != -1) matrix[bestR][bestC] = kingChar
-        else {
-            val defaultR = if (isWhite) 7 else 0
-            matrix[defaultR][4] = kingChar
+        } catch (e: Exception) {
+            scanning.set(false)
         }
     }
 
-    private fun runAutoLoop() {
-        if (!isAutoMode) return
-        scanAndSuggestMove()
-        mainHandler.postDelayed({ runAutoLoop() }, 2000)
+    private fun doScan(manual: Boolean) {
+        val size = readScreenSize()
+        if (size.first != screenWidth || size.second != screenHeight) {
+            setStatus("Màn hình đã xoay/đổi kích thước • đóng và mở lại app"); return
+        }
+        if (screenHeight <= screenWidth) { setStatus("Chỉ hỗ trợ màn hình dọc"); return }
+
+        val px = captureBoard() ?: return
+        val cells = readCells(px, screenWidth)
+
+        if (learnRequested) { learnRequested = false; learnTemplates(cells); return }
+        if (!templatesReady()) {
+            setStatus("Chưa học quân: mở ván mới (thế khởi đầu) rồi bấm 📚"); return
+        }
+
+        var pieceCount = 0
+        for (r in 0..7) for (c in 0..7) if (cells[r][c].occupied) pieceCount++
+        if (pieceCount < 2) { setStatus("Chưa thấy quân cờ • kiểm tra 4 góc xanh / chỉnh ▲▼"); return }
+        if (pieceCount > 32) {
+            setStatus("Thấy $pieceCount quân (quá nhiều) • tắt chấm gợi ý nước đi trong app cờ hoặc chỉnh ▲▼"); return
+        }
+
+        val raw = Array(8) { CharArray(8) { '1' } }
+        for (r in 0..7) for (c in 0..7) {
+            val cell = cells[r][c]
+            if (!cell.occupied) continue
+            val ch = classify(cell, cell.coreLum >= lumThr)
+            if (ch == '?') {
+                setStatus("Có quân không nhận ra • thử 📚 học lại nếu đổi bộ quân/theme"); return
+            }
+            raw[r][c] = ch
+        }
+        val white = whiteBottom
+        val std = if (white) raw else Array(8) { r -> CharArray(8) { c -> raw[7 - r][7 - c] } }
+        val key = Chess.fenBoard(std)
+        Log.d(TAG, "board=$key")
+
+        validateBoard(std)?.let { setStatus("Đọc bàn cờ chưa chắc: $it"); return }
+
+        // Auto: cần 2 lần quét liên tiếp giống nhau mới chấp nhận (tránh đọc giữa lúc quân đang di chuyển)
+        if (!manual && key != confirmedKey) {
+            if (key != pendingKey) { pendingKey = key; return }
+        }
+        confirmedKey = key; pendingKey = ""
+
+        val p = syncPosition(std, manual) ?: return
+
+        if (p.whiteToMove != white) {
+            mainHandler.post { chessOverlayView.setMove(null) }
+            setStatus("⏳ Chờ đối thủ (lượt ${if (p.whiteToMove) "Trắng" else "Đen"})" +
+                    (if (turnAssumed) " • lượt giả định, bấm 🔁 nếu sai" else ""))
+            return
+        }
+        suggest(p, manual, pieceCount)
     }
 
-    // GỌI KÉP 2 SERVER STOCKFISH ĐỂ KHÔNG BAO GIỜ BỊ NGHẼN MẠNG
-    private fun fetchStockfishWithFallback(fen: String): String? {
-        val move1 = fetchFromStockfishOnline(fen)
-        if (move1 != null) return move1
-        return fetchFromChessApi(fen)
+    // ------------------------------------------------------ Theo dõi trạng thái ván
+
+    private fun isStart(m: Array<CharArray>): Boolean {
+        for (r in 0..7) if (String(m[r]) != START_ROWS[r]) return false
+        return true
+    }
+
+    private fun syncPosition(std: Array<CharArray>, manual: Boolean): Position? {
+        val cur = pos ?: return resync(std)
+        if (cur.sameBoard(std)) return cur
+
+        val next = findTransition(cur, std)
+        if (next != null) {
+            pos = next; turnAssumed = false
+            unexplainedKey = ""; unexplainedCount = 0
+            return next
+        }
+        if (isStart(std)) return resync(std)
+
+        val key = Chess.fenBoard(std)
+        if (key == unexplainedKey) unexplainedCount++ else { unexplainedKey = key; unexplainedCount = 1 }
+        if (manual || unexplainedCount >= 2) return resync(std)
+        setStatus("Thế cờ chưa khớp nước đi hợp lệ nào, đang xác nhận lại...")
+        return null
+    }
+
+    /** Thế mới có phải kết quả của 1 hoặc 2 nước hợp lệ từ thế cũ không? */
+    private fun findTransition(cur: Position, std: Array<CharArray>): Position? {
+        val l1 = Chess.legal(cur)
+        for (m in l1) {
+            val p1 = Chess.apply(cur, m)
+            if (p1.sameBoard(std)) return p1
+        }
+        for (m in l1) {
+            val p1 = Chess.apply(cur, m)
+            for (m2 in Chess.legal(p1)) {
+                val p2 = Chess.apply(p1, m2)
+                if (p2.sameBoard(std)) return p2
+            }
+        }
+        return null
+    }
+
+    /** Khởi tạo/đồng bộ lại: không biết lịch sử nên không cho nhập thành (trừ thế khởi đầu), lượt đi là giả định. */
+    private fun resync(std: Array<CharArray>): Position? {
+        unexplainedKey = ""; unexplainedCount = 0
+        val start = isStart(std)
+        var p = Position(Chess.copy(std), if (start) true else whiteBottom, if (start) "KQkq" else "-", "-")
+        turnAssumed = !start
+        // Bên không có lượt mà đang bị chiếu là bất hợp lệ -> lượt phải là của bên kia
+        if (Chess.inCheck(p.b, !p.whiteToMove)) p = Position(p.b, !p.whiteToMove, "-", "-")
+        if (Chess.inCheck(p.b, !p.whiteToMove)) {
+            setStatus("Cả hai Vua đều bị chiếu → chắc chắn đọc sai bàn cờ"); pos = null; return null
+        }
+        pos = p
+        lastSuggestedFen = ""
+        return p
+    }
+
+    private fun validateBoard(m: Array<CharArray>): String? {
+        var wk = 0; var bk = 0; var wn = 0; var bn = 0; var wp = 0; var bp = 0
+        var wkR = -1; var wkC = -1; var bkR = -1; var bkC = -1
+        for (r in 0..7) for (c in 0..7) {
+            val ch = m[r][c]
+            if (ch == '1') continue
+            if (ch.isUpperCase()) wn++ else bn++
+            when (ch) {
+                'K' -> { wk++; wkR = r; wkC = c }
+                'k' -> { bk++; bkR = r; bkC = c }
+                'P' -> { wp++; if (r == 0 || r == 7) return "tốt ở hàng cuối" }
+                'p' -> { bp++; if (r == 0 || r == 7) return "tốt ở hàng cuối" }
+            }
+        }
+        if (wk != 1 || bk != 1) return "cần đúng 1 Vua mỗi bên (thấy $wk trắng / $bk đen)"
+        if (wn > 16 || bn > 16 || wp > 8 || bp > 8) return "số quân vượt mức hợp lệ"
+        if (abs(wkR - bkR) <= 1 && abs(wkC - bkC) <= 1) return "hai Vua đứng sát nhau"
+        return null
+    }
+
+    // ------------------------------------------------------------ Gợi ý nước đi
+
+    private fun suggest(p: Position, manual: Boolean, pieceCount: Int) {
+        val legal = Chess.legal(p)
+        if (legal.isEmpty()) {
+            mainHandler.post { chessOverlayView.setMove(null) }
+            setStatus(if (Chess.inCheck(p.b, p.whiteToMove)) "Chiếu bí" else "Hòa (hết nước đi)")
+            return
+        }
+        val fen = p.fen()
+        if (!manual && fen == lastSuggestedFen) return
+
+        var mv: String? = null
+        var src = "online"
+        val api = getApiMove(fen, manual)
+        if (api != null && legal.any { it.uci() == api }) mv = api
+        if (mv == null) {
+            val m = Chess.bestMove(p, ENGINE_TIME_MS)
+            if (m != null) { mv = m.uci(); src = "offline" }
+        }
+        if (mv == null) return
+        lastSuggestedFen = fen
+
+        val promo = if (mv.length == 5) "=${mv[4].uppercaseChar()}" else ""
+        val text = "✅ ${mv.substring(0, 2).uppercase()} ➔ ${mv.substring(2, 4).uppercase()}$promo " +
+                "($src, $pieceCount quân)" + (if (turnAssumed) " • lượt giả định, 🔁 nếu sai" else "")
+        val shown = mv.substring(0, 4)
+        mainHandler.post {
+            chessOverlayView.setMove(shown)
+            tvStatus.text = text
+        }
+    }
+
+    // -------------------------------------------------------------- Engine API
+
+    private val uciRegex = Regex("^[a-h][1-8][a-h][1-8][qrbn]?$")
+
+    private fun getApiMove(fen: String, manual: Boolean): String? {
+        fenCache[fen]?.let { return it }
+        val now = SystemClock.elapsedRealtime()
+        if (!manual && now < nextApiAt) return null // đang backoff -> dùng engine offline
+        val mv = fetchFromStockfishOnline(fen) ?: fetchFromChessApi(fen)
+        if (mv == null) {
+            failCount++
+            nextApiAt = now + minOf(30_000L, 2_000L shl minOf(failCount, 4))
+            return null
+        }
+        failCount = 0; nextApiAt = 0L
+        if (fenCache.size > 200) fenCache.clear()
+        fenCache[fen] = mv
+        return mv
     }
 
     private fun fetchFromStockfishOnline(fen: String): String? {
+        var conn: HttpURLConnection? = null
         return try {
-            val encodedFen = URLEncoder.encode(fen, "UTF-8")
-            val url = URL("https://stockfish.online/api/s/v2.php?fen=$encodedFen&depth=11")
-            val conn = (url.openConnection() as HttpURLConnection).apply {
-                requestMethod = "GET"
-                connectTimeout = 4500; readTimeout = 4500
+            val url = URL("https://stockfish.online/api/s/v2.php?fen=${URLEncoder.encode(fen, "UTF-8")}&depth=12")
+            conn = (url.openConnection() as HttpURLConnection).apply {
+                requestMethod = "GET"; connectTimeout = 2500; readTimeout = 4000
                 setRequestProperty("User-Agent", "Mozilla/5.0")
             }
-            if (conn.responseCode == 200) {
-                val json = JSONObject(conn.inputStream.bufferedReader().readText())
-                if (!json.optBoolean("success", true)) return null
-                val raw = json.optString("bestmove", "").ifEmpty { json.optString("data", "") }
-                val parts = raw.trim().split(" ")
-                val candidate = if (parts.size >= 2) parts[1] else parts[0]
-                if (candidate.length >= 4 && candidate != "(none)") candidate.substring(0, 4) else null
-            } else null
-        } catch (e: Exception) { null }
+            if (conn.responseCode != 200) return null
+            val json = JSONObject(conn.inputStream.bufferedReader().readText())
+            if (!json.optBoolean("success", true)) return null
+            val raw = json.optString("bestmove", "").ifEmpty { json.optString("data", "") }
+            val parts = raw.trim().split(" ")
+            val cand = (if (parts.size >= 2) parts[1] else parts[0]).trim()
+            if (uciRegex.matches(cand)) cand else null
+        } catch (e: Exception) { null } finally { conn?.disconnect() }
     }
 
     private fun fetchFromChessApi(fen: String): String? {
+        var conn: HttpURLConnection? = null
         return try {
-            val url = URL("https://chess-api.com/v1")
-            val conn = (url.openConnection() as HttpURLConnection).apply {
-                requestMethod = "POST"
-                connectTimeout = 4500; readTimeout = 4500
-                setRequestProperty("Content-Type", "application/json")
-                doOutput = true
+            conn = (URL("https://chess-api.com/v1").openConnection() as HttpURLConnection).apply {
+                requestMethod = "POST"; connectTimeout = 2500; readTimeout = 4000
+                setRequestProperty("Content-Type", "application/json"); doOutput = true
             }
-            val payload = JSONObject().put("fen", fen).put("depth", 10).toString()
-            conn.outputStream.use { it.write(payload.toByteArray()) }
-            if (conn.responseCode == 200) {
-                val json = JSONObject(conn.inputStream.bufferedReader().readText())
-                val move = json.optString("move", "")
-                if (move.length >= 4) move.substring(0, 4) else null
-            } else null
-        } catch (e: Exception) { null }
+            conn.outputStream.use { it.write(JSONObject().put("fen", fen).put("depth", 12).toString().toByteArray()) }
+            if (conn.responseCode != 200) return null
+            val move = JSONObject(conn.inputStream.bufferedReader().readText()).optString("move", "")
+            if (uciRegex.matches(move)) move else null
+        } catch (e: Exception) { null } finally { conn?.disconnect() }
     }
+
+    // ------------------------------------------------------------- Vòng đời
 
     private fun startForegroundNotification() {
         val channelId = "chess_overlay_channel"
         val channel = NotificationChannel(channelId, "Chess Overlay", NotificationManager.IMPORTANCE_LOW)
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         val notif = Notification.Builder(this, channelId)
-            .setContentTitle("Stealth Vision v5.2")
+            .setContentTitle("Chess Vision v6.0")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .build()
-        startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION)
+        } else {
+            startForeground(1, notif)
+        }
     }
 
     override fun onDestroy() {
-        super.onDestroy()
+        destroyed = true
         isAutoMode = false
+        mainHandler.removeCallbacksAndMessages(null)
         workerExecutor.shutdownNow()
-        virtualDisplay?.release(); mediaProjection?.stop()
-        if (::chessOverlayView.isInitialized) windowManager.removeView(chessOverlayView)
-        if (::controlLayout.isInitialized) windowManager.removeView(controlLayout)
+        try { virtualDisplay?.release() } catch (e: Exception) { }
+        synchronized(imageLock) { heldImage?.close(); heldImage = null }
+        try { imageReader?.close() } catch (e: Exception) { }
+        try { mediaProjection?.stop() } catch (e: Exception) { }
+        if (::frameThread.isInitialized) frameThread.quitSafely()
+        try { if (::chessOverlayView.isInitialized) windowManager.removeView(chessOverlayView) } catch (e: Exception) { }
+        try { if (::controlLayout.isInitialized) windowManager.removeView(controlLayout) } catch (e: Exception) { }
+        super.onDestroy()
     }
 }
