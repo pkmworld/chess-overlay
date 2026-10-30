@@ -17,7 +17,7 @@ class ChessOverlayView(context: Context) : View(context) {
     private var promotionPiece: Char? = null
 
     private val cornerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(190, 0, 230, 118)
+        color = Color.argb(195, 0, 230, 118)
         style = Paint.Style.STROKE
         strokeWidth = 5f
         strokeCap = Paint.Cap.ROUND
@@ -47,7 +47,7 @@ class ChessOverlayView(context: Context) : View(context) {
     }
     private val promoTextPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
         color = Color.WHITE
-        textSize = 34f
+        textSize = 32f
         typeface = Typeface.DEFAULT_BOLD
         textAlign = Paint.Align.CENTER
     }
@@ -111,7 +111,8 @@ class ChessOverlayView(context: Context) : View(context) {
                     'B' -> "PHONG TƯỢNG (B)"
                     else -> "PHONG $promo"
                 }
-                val badgeRect = RectF(endCenter.x - 120f, endCenter.y - cellSize / 2 - 46f, endCenter.x + 120f, endCenter.y - cellSize / 2 - 4f)
+                val badgeTop = (endCenter.y - cellSize / 2 - 46f).coerceAtLeast(4f)
+                val badgeRect = RectF(endCenter.x - 115f, badgeTop, endCenter.x + 115f, badgeTop + 42f)
                 canvas.drawRoundRect(badgeRect, 12f, 12f, promoBgPaint)
                 canvas.drawText(label, endCenter.x, badgeRect.centerY() + 11f, promoTextPaint)
             }
