@@ -11,38 +11,34 @@ class ChessOverlayView(context: Context) : View(context) {
 
     var detectedBoardRect: RectF? = null
     var isWhiteBottom = true
+    var showCornerMarkers = true
 
     private var fromSquare: String? = null
     private var toSquare: String? = null
 
-    private val borderPaint = Paint().apply {
-        color = Color.argb(220, 0, 230, 118)
+    private val cornerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(180, 0, 230, 118)
         style = Paint.Style.STROKE
-        strokeWidth = 4f
-    }
-    
-    private val gridPaint = Paint().apply {
-        color = Color.argb(120, 255, 255, 255)
-        style = Paint.Style.STROKE
-        strokeWidth = 1.5f
+        strokeWidth = 6f
+        strokeCap = Paint.Cap.ROUND
     }
 
-    private val highlightFromPaint = Paint().apply {
-        color = Color.argb(120, 255, 214, 0)
+    private val highlightFromPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(115, 255, 214, 0)
         style = Paint.Style.FILL
     }
-    private val highlightToPaint = Paint().apply {
-        color = Color.argb(140, 0, 200, 83)
+    private val highlightToPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        color = Color.argb(135, 0, 230, 118)
         style = Paint.Style.FILL
     }
     private val arrowPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(250, 0, 230, 118)
+        color = Color.argb(245, 0, 230, 118)
         style = Paint.Style.STROKE
-        strokeWidth = 24f
+        strokeWidth = 22f
         strokeCap = Paint.Cap.ROUND
     }
     private val arrowHeadPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(250, 0, 230, 118)
+        color = Color.argb(245, 0, 230, 118)
         style = Paint.Style.FILL
     }
 
@@ -61,16 +57,32 @@ class ChessOverlayView(context: Context) : View(context) {
         super.onDraw(canvas)
         val board = detectedBoardRect ?: return
 
-        canvas.save()
-        canvas.translate(board.left, board.top)
-        val boardSize = board.width()
+        // BÙ TRỪ CHÍNH XÁC LỆCH TỌA ĐỘ STATUS BAR CỦA ANDROID
+        val loc = IntArray(2)
+        getLocationOnScreen(loc)
+        val offsetY = loc[1].toFloat()
+        val offsetX = loc[0].toFloat()
 
-        canvas.drawRect(0f, 0f, boardSize, boardSize, borderPaint)
-        val cellSize = boardSize / 8f
-        for (i in 1..7) {
-            val linePos = i * cellSize
-            canvas.drawLine(linePos, 0f, linePos, boardSize, gridPaint)
-            canvas.drawLine(0f, linePos, boardSize, linePos, gridPaint)
+        canvas.save()
+        canvas.translate(board.left - offsetX, board.top - offsetY)
+        val size = board.width()
+        val cellSize = size / 8f
+
+        // Chỉ vẽ 4 dấu ngoặc nhỏ ở 4 góc ngoài cùng để biết bàn cờ đã bắt chuẩn (Không kẻ lưới che bàn cờ)
+        if (showCornerMarkers) {
+            val len = 36f
+            // Góc trên trái
+            canvas.drawLine(0f, 0f, len, 0f, cornerPaint)
+            canvas.drawLine(0f, 0f, 0f, len, cornerPaint)
+            // Góc trên phải
+            canvas.drawLine(size - len, 0f, size, 0f, cornerPaint)
+            canvas.drawLine(size, 0f, size, len, cornerPaint)
+            // Góc dưới trái
+            canvas.drawLine(0f, size - len, 0f, size, cornerPaint)
+            canvas.drawLine(0f, size, len, size, cornerPaint)
+            // Góc dưới phải
+            canvas.drawLine(size - len, size, size, size, cornerPaint)
+            canvas.drawLine(size, size - len, size, size, cornerPaint)
         }
 
         val fSq = fromSquare
@@ -79,13 +91,15 @@ class ChessOverlayView(context: Context) : View(context) {
             val startCenter = getSquareCenterLocal(fSq, cellSize)
             val endCenter = getSquareCenterLocal(tSq, cellSize)
 
-            canvas.drawRect(
-                startCenter.x - cellSize / 2, startCenter.y - cellSize / 2,
-                startCenter.x + cellSize / 2, startCenter.y + cellSize / 2, highlightFromPaint
+            canvas.drawRoundRect(
+                startCenter.x - cellSize / 2 + 4f, startCenter.y - cellSize / 2 + 4f,
+                startCenter.x + cellSize / 2 - 4f, startCenter.y + cellSize / 2 - 4f,
+                12f, 12f, highlightFromPaint
             )
-            canvas.drawRect(
-                endCenter.x - cellSize / 2, endCenter.y - cellSize / 2,
-                endCenter.x + cellSize / 2, endCenter.y + cellSize / 2, highlightToPaint
+            canvas.drawRoundRect(
+                endCenter.x - cellSize / 2 + 4f, endCenter.y - cellSize / 2 + 4f,
+                endCenter.x + cellSize / 2 - 4f, endCenter.y + cellSize / 2 - 4f,
+                12f, 12f, highlightToPaint
             )
             drawArrowLocal(canvas, startCenter.x, startCenter.y, endCenter.x, endCenter.y)
         }
@@ -103,7 +117,7 @@ class ChessOverlayView(context: Context) : View(context) {
     private fun drawArrowLocal(canvas: Canvas, startX: Float, startY: Float, endX: Float, endY: Float) {
         canvas.drawLine(startX, startY, endX, endY, arrowPaint)
         val angle = atan2((endY - startY).toDouble(), (endX - startX).toDouble())
-        val arrowLength = 50f
+        val arrowLength = 48f
         val arrowAngle = Math.toRadians(32.0)
         val x1 = endX - arrowLength * cos(angle - arrowAngle).toFloat()
         val y1 = endY - arrowLength * sin(angle - arrowAngle).toFloat()

@@ -28,7 +28,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(64, 64, 64, 64)
         }
         val btnStart = Button(this).apply {
-            text = "KHỞI CHẠY AUTO VISION v4.1.8"
+            text = "KHỞI CHẠY STEALTH VISION v5.2"
             textSize = 18f
             setOnClickListener { checkPermissionsAndStart() }
         }
@@ -57,7 +57,7 @@ class MainActivity : AppCompatActivity() {
             if (Settings.canDrawOverlays(this)) requestScreenCapture()
         } else if (requestCode == REQUEST_MEDIA_PROJECTION) {
             if (resultCode == Activity.RESULT_OK && data != null) {
-                Toast.makeText(this, "Đã bật Auto Vision v4.1.8...", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this, "Đã bật Stealth Vision v5.2...", Toast.LENGTH_SHORT).show()
                 val serviceIntent = Intent(this, OverlayService::class.java).apply {
                     putExtra("RESULT_CODE", resultCode)
                     putExtra("DATA", data)
@@ -67,7 +67,7 @@ class MainActivity : AppCompatActivity() {
                 } else {
                     startService(serviceIntent)
                 }
-                Handler(Looper.getMainLooper()).postDelayed({ moveTaskToBack(true) }, 800)
+                Handler(Looper.getMainLooper()).postDelayed({ moveTaskToBack(true) }, 600)
             }
         }
     }
