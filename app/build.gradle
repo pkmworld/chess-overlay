@@ -11,8 +11,8 @@ android {
         applicationId "com.example.chessvision"
         minSdk 26
         targetSdk 34
-        versionCode 12
-        versionName "4.1.6"
+        versionCode 22
+        versionName "6.2"
     }
 
     compileOptions {
