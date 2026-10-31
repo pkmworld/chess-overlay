@@ -268,7 +268,7 @@ class OverlayService : Service() {
         }
 
         tvStatus = TextView(this).apply {
-            text = "Chess Pro v7.3.2 • Đã fix Editor Function"
+            text = "Chess Pro v7.4 • Đã khôi phục Nút Lưu"
             setTextColor(Color.parseColor("#00E676")); textSize = 12.5f; gravity = Gravity.CENTER; setPadding(0, 0, 0, 16)
         }
         tvFenDebug = TextView(this).apply {
@@ -325,7 +325,7 @@ class OverlayService : Service() {
                 setOverlayTouchable(false)
                 (btn.parent as LinearLayout).removeView(btn)
                 mainControlPanel.visibility = View.VISIBLE
-                forceEvaluateMatrix() // Hàm bị thiếu ở v7.3.1 đã được phục hồi!
+                forceEvaluateMatrix()
             }
             (mainControlPanel.parent as LinearLayout).addView(exitEditBtn, 1)
         }
@@ -368,7 +368,18 @@ class OverlayService : Service() {
         val cRow3 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         cRow3.addView(createButton("➕ To ra", "#34495e") { scaleBoard(8f) })
         cRow3.addView(createButton("➖ Nhỏ lại", "#34495e") { scaleBoard(-8f) })
-        val btnSaveCalib = createButton("✔️ LƯU KHUNG", "#27ae60") {
+        
+        // --- ĐÂY CHÍNH LÀ ĐOẠN ĐÃ FIX LỖI TÀNG HÌNH NÚT LƯU ---
+        val cRow4 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
+        
+        val btnCancelCalib = createButton("❌ HỦY", "#c0392b") {
+            calibControlPanel.visibility = View.GONE
+            mainControlPanel.visibility = View.VISIBLE
+            chessOverlayView.isCalibrationMode = false
+            chessOverlayView.invalidate()
+        }
+
+        val btnSaveCalib = createButton("✔️ LƯU", "#27ae60") {
             calibControlPanel.visibility = View.GONE
             mainControlPanel.visibility = View.VISIBLE
             chessOverlayView.isCalibrationMode = false
@@ -379,7 +390,15 @@ class OverlayService : Service() {
             resetState()
             requestCleanCapture(true)
         }
-        calibControlPanel.addView(tvCalib); calibControlPanel.addView(cRow1); calibControlPanel.addView(cRow2); calibControlPanel.addView(cRow3); calibControlPanel.addView(btnSaveCalib)
+        
+        cRow4.addView(btnCancelCalib)
+        cRow4.addView(btnSaveCalib)
+
+        calibControlPanel.addView(tvCalib)
+        calibControlPanel.addView(cRow1)
+        calibControlPanel.addView(cRow2)
+        calibControlPanel.addView(cRow3)
+        calibControlPanel.addView(cRow4) // Add hàng chứa nút Hủy & Lưu
 
         val rootContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(mainControlPanel); addView(calibControlPanel) }
 
@@ -619,7 +638,6 @@ class OverlayService : Service() {
         }
     }
 
-    // HÀM ÉP TÍNH NƯỚC KHI BẤM NÚT "LƯU & TÍNH NƯỚC"
     private fun forceEvaluateMatrix() {
         val matrix = validMatrix ?: return
         val boardFen = buildFenBoardString(matrix)
@@ -656,7 +674,7 @@ class OverlayService : Service() {
 
     private fun processCapturedBitmap(fullBmp: Bitmap) {
         try {
-            var boardRect = detectedBoardRect
+            val boardRect = detectedBoardRect
             if (boardRect == null) {
                 mainHandler.post { tvStatus.text = "⚠️ Hãy chỉnh khung bàn cờ trước" }
                 return
@@ -879,7 +897,6 @@ class OverlayService : Service() {
         if (buildFenBoardString(currentMatrix) == startFen) {
             previousValidMatrix = Array(8) { r -> currentMatrix[r].clone() }
             lastDetectedTurn = 'w'
-            lastEnPassantTarget = "-"
             return 'w'
         }
 
@@ -950,7 +967,7 @@ class OverlayService : Service() {
     private fun startForegroundNotification() {
         val channel = NotificationChannel("chess_overlay_channel", "Chess Overlay", NotificationManager.IMPORTANCE_LOW)
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-        val notif = Notification.Builder(this, "chess_overlay_channel").setContentTitle("Chess Pro v7.3.2").setSmallIcon(android.R.drawable.ic_menu_compass).build()
+        val notif = Notification.Builder(this, "chess_overlay_channel").setContentTitle("Chess Pro v7.4").setSmallIcon(android.R.drawable.ic_menu_compass).build()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION) else startForeground(1, notif)
     }
 
