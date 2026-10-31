@@ -9,7 +9,7 @@
 
     <application
         android:allowBackup="true"
-        android:label="Chess Pro v9.2"
+        android:label="Chess Pro v9.4"
         android:supportsRtl="true"
         android:theme="@style/Theme.AppCompat.Light.NoActionBar">
 
