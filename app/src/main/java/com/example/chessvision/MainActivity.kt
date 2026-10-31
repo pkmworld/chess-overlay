@@ -32,7 +32,7 @@ class MainActivity : AppCompatActivity() {
         if (Settings.canDrawOverlays(this)) {
             requestScreenCapture()
         } else {
-            Toast.makeText(this, "Cần cấp quyền vẽ đè màn hình để hoạt động!", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Cần cấp quyền vẽ đè màn hình!", Toast.LENGTH_SHORT).show()
         }
     }
 
@@ -41,7 +41,7 @@ class MainActivity : AppCompatActivity() {
     ) { result ->
         val data = result.data
         if (result.resultCode == Activity.RESULT_OK && data != null) {
-            Toast.makeText(this, "Đang khởi động True Vision v6.3...", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Đang khởi động Chess Pro v9.2...", Toast.LENGTH_SHORT).show()
             val serviceIntent = Intent(this, OverlayService::class.java).apply {
                 putExtra("RESULT_CODE", result.resultCode)
                 putExtra("DATA", data)
@@ -51,7 +51,7 @@ class MainActivity : AppCompatActivity() {
             } else {
                 startService(serviceIntent)
             }
-            Handler(Looper.getMainLooper()).postDelayed({ moveTaskToBack(true) }, 450)
+            Handler(Looper.getMainLooper()).postDelayed({ moveTaskToBack(true) }, 400)
         }
     }
 
@@ -63,7 +63,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(64, 64, 64, 64)
         }
         val btnStart = Button(this).apply {
-            text = "KHỞI CHẠY TRUE VISION v6.3"
+            text = "KHỞI CHẠY CHESS PRO v9.2"
             textSize = 18f
             setOnClickListener { checkPermissionsAndStart() }
         }
