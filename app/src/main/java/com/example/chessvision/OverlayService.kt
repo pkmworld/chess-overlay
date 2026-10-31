@@ -1,6 +1,5 @@
 package com.example.chessvision
 
-import kotlin.math.sqrt
 import android.app.*
 import android.content.Context
 import android.content.Intent
@@ -27,6 +26,7 @@ import android.view.WindowManager
 import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.TextView
+import android.widget.Toast
 import org.json.JSONObject
 import java.net.HttpURLConnection
 import java.net.URL
@@ -39,6 +39,7 @@ import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.math.abs
 import kotlin.math.min
+import kotlin.math.sqrt
 
 class OverlayService : Service() {
 
@@ -83,20 +84,23 @@ class OverlayService : Service() {
     @Volatile private var detectedBoardRect: RectF? = null
     @Volatile private var validMatrix: Array<CharArray>? = null
     @Volatile private var lastDetectedTurn: Char = 'w'
+    @Volatile private var previousValidMatrix: Array<CharArray>? = null
     @Volatile private var lastEnPassantTarget: String = "-"
     @Volatile private var halfmoveClock = 0
     @Volatile private var fullmoveNumber = 1
+    @Volatile private var hasFullGameHistory = false
+    @Volatile private var wKingMoved = false
+    @Volatile private var wRookAMoved = false
+    @Volatile private var wRookHMoved = false
+    @Volatile private var bKingMoved = false
+    @Volatile private var bRookAMoved = false
+    @Volatile private var bRookHMoved = false
 
     private val stateGeneration = AtomicLong(0L)
     @Volatile private var latestValidStateKey = ""
     @Volatile private var lastCompletedStateKey = ""
-    @Volatile private var sameBoardWaitCount = 0
-
-    @Volatile private var consecutiveValidationFailures = 0
-
     @Volatile private var forceTurnSide: Char? = null
-    @Volatile private var castlingMode = 0
-    
+
     private val moveCache = ConcurrentHashMap<String, String>()
 
     data class CellAnalysis(
@@ -264,7 +268,7 @@ class OverlayService : Service() {
         }
 
         tvStatus = TextView(this).apply {
-            text = "Chess Pro v7.3 • Lọc Inverted Mask"
+            text = "Chess Pro v7.3.2 • Đã fix Editor Function"
             setTextColor(Color.parseColor("#00E676")); textSize = 12.5f; gravity = Gravity.CENTER; setPadding(0, 0, 0, 16)
         }
         tvFenDebug = TextView(this).apply {
@@ -321,7 +325,7 @@ class OverlayService : Service() {
                 setOverlayTouchable(false)
                 (btn.parent as LinearLayout).removeView(btn)
                 mainControlPanel.visibility = View.VISIBLE
-                forceEvaluateMatrix()
+                forceEvaluateMatrix() // Hàm bị thiếu ở v7.3.1 đã được phục hồi!
             }
             (mainControlPanel.parent as LinearLayout).addView(exitEditBtn, 1)
         }
@@ -364,16 +368,7 @@ class OverlayService : Service() {
         val cRow3 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         cRow3.addView(createButton("➕ To ra", "#34495e") { scaleBoard(8f) })
         cRow3.addView(createButton("➖ Nhỏ lại", "#34495e") { scaleBoard(-8f) })
-        val cRow4 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
-        
-        val btnCancelCalib = createButton("❌ HỦY", "#c0392b") {
-            calibControlPanel.visibility = View.GONE
-            mainControlPanel.visibility = View.VISIBLE
-            chessOverlayView.isCalibrationMode = false
-            chessOverlayView.invalidate()
-        }
-
-        val btnSaveCalib = createButton("✔️ LƯU", "#27ae60") {
+        val btnSaveCalib = createButton("✔️ LƯU KHUNG", "#27ae60") {
             calibControlPanel.visibility = View.GONE
             mainControlPanel.visibility = View.VISIBLE
             chessOverlayView.isCalibrationMode = false
@@ -384,15 +379,7 @@ class OverlayService : Service() {
             resetState()
             requestCleanCapture(true)
         }
-        
-        cRow4.addView(btnCancelCalib)
-        cRow4.addView(btnSaveCalib)
-
-        calibControlPanel.addView(tvCalib)
-        calibControlPanel.addView(cRow1)
-        calibControlPanel.addView(cRow2)
-        calibControlPanel.addView(cRow3)
-        calibControlPanel.addView(cRow4) // Nút Lưu và Hủy giờ đã nằm ngang đàng hoàng
+        calibControlPanel.addView(tvCalib); calibControlPanel.addView(cRow1); calibControlPanel.addView(cRow2); calibControlPanel.addView(cRow3); calibControlPanel.addView(btnSaveCalib)
 
         val rootContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(mainControlPanel); addView(calibControlPanel) }
 
@@ -434,8 +421,6 @@ class OverlayService : Service() {
 
     private fun resetState() {
         lastCompletedStateKey = ""
-        sameBoardWaitCount = 0
-        consecutiveValidationFailures = 0
         chessOverlayView.setMove(null)
     }
 
@@ -485,7 +470,7 @@ class OverlayService : Service() {
         val rowB2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
         rowB2.addView(createPieceBtn("XE ⚫", 'r', false)); rowB2.addView(createPieceBtn("HẬU ⚫", 'q', false)); rowB2.addView(createPieceBtn("VUA ⚫", 'k', false))
 
-        val btnClear = createButton("❌ XÓA THÀNH Ô TRỐNG", "#c0392b") {
+        val btnClear = createButton("❌ XÓA TRỐNG", "#c0392b") {
             validMatrix?.get(r)?.set(c, '1')
             chessOverlayView.currentMatrix = validMatrix
             chessOverlayView.invalidate()
@@ -562,7 +547,7 @@ class OverlayService : Service() {
             try { lastCleanFullBitmap?.recycle(); lastCleanFullBitmap = bmp.copy(Bitmap.Config.ARGB_8888, false) } catch (_: Exception) {}
         }
     }
-    
+
     private fun obtainCachedCleanBitmapCopy(): Bitmap? {
         synchronized(frameCacheLock) {
             val cached = lastCleanFullBitmap ?: return null
@@ -573,10 +558,9 @@ class OverlayService : Service() {
 
     private fun requestCleanCapture(manualTrigger: Boolean) {
         if (isProcessing.get() || waitingForCleanFrame || chessOverlayView.isEditorMode || chessOverlayView.isCalibrationMode) return
-        if (manualTrigger) sameBoardWaitCount = 10
-
         mainHandler.post {
-            if (!chessOverlayView.hasActiveArrow()) {
+            val needHideArrow = chessOverlayView.hasActiveArrow()
+            if (!needHideArrow) {
                 val img = try { imageReader?.acquireLatestImage() } catch (_: Exception) { null }
                 if (img != null && isProcessing.compareAndSet(false, true)) {
                     try {
@@ -597,8 +581,8 @@ class OverlayService : Service() {
             Choreographer.getInstance().postFrameCallback {
                 cleanFrameMinTimestamp = SystemClock.uptimeMillis() + 20L
                 waitingForCleanFrame = true
-                controlLayout.alpha = if (controlLayout.alpha < 0.99f) 1.0f else 0.985f
-                controlLayout.invalidate()
+                mainControlPanel.alpha = if (mainControlPanel.alpha < 0.99f) 1.0f else 0.985f
+                mainControlPanel.invalidate()
 
                 bgHandler?.postDelayed({
                     if (waitingForCleanFrame && !isProcessing.get()) {
@@ -635,6 +619,7 @@ class OverlayService : Service() {
         }
     }
 
+    // HÀM ÉP TÍNH NƯỚC KHI BẤM NÚT "LƯU & TÍNH NƯỚC"
     private fun forceEvaluateMatrix() {
         val matrix = validMatrix ?: return
         val boardFen = buildFenBoardString(matrix)
@@ -642,15 +627,14 @@ class OverlayService : Service() {
 
         val myColorChar = if (chessOverlayView.isWhiteBottom) 'w' else 'b'
         val activeTurn = forceTurnSide ?: lastDetectedTurn
-        val castlingStr = getValidCastlingString(matrix)
-
+        
         val stateKey = "$boardFen|$activeTurn|EDITED"
         latestValidStateKey = stateKey
         val reqGen = stateGeneration.incrementAndGet()
         
-        val fullFen = "$boardFen $activeTurn $castlingStr - 0 1"
+        val fullFen = "$boardFen $activeTurn - - 0 1"
 
-        mainHandler.post { tvStatus.text = "⚡ Đang tính nước theo bàn cờ sửa..." }
+        mainHandler.post { tvStatus.text = "⚡ Đang tính nước theo bàn cờ sửa tay..." }
         workerExecutor.execute {
             var bestMove = raceBothStockfishServers(fullFen)
             if (bestMove == null) {
@@ -692,7 +676,6 @@ class OverlayService : Service() {
 
             val cells = Array(8) { r -> Array(8) { c -> analyzeCellVariance(boardPixels, r, c) } }
             
-            // Tìm ngưỡng sáng Trắng/Đen (Median thay vì KMeans để ổn định hơn)
             val lums = mutableListOf<Int>()
             for (r in 0..7) for (c in 0..7) if (cells[r][c].isOccupied) lums.add(cells[r][c].avgPieceLum)
             var threshold = 145
@@ -712,63 +695,32 @@ class OverlayService : Service() {
                 }
             }
 
-            val whiteBottomNow = chessOverlayView.isWhiteBottom
-            val standardMatrix = if (whiteBottomNow) rawMatrix else Array(8) { r -> CharArray(8) { c -> rawMatrix[7 - r][7 - c] } }
+            val standardMatrix = if (chessOverlayView.isWhiteBottom) rawMatrix else Array(8) { r -> CharArray(8) { c -> rawMatrix[7 - r][7 - c] } }
             validMatrix = standardMatrix
 
             val validationError = validateChessPositionStrict(standardMatrix)
             if (validationError != null) {
-                consecutiveValidationFailures++
-                if (consecutiveValidationFailures >= 5) {
-                    resolveSideKingQueen(standardMatrix, isWhite = true, cells = cells, whiteBottom = whiteBottomNow)
-                    resolveSideKingQueen(standardMatrix, isWhite = false, cells = cells, whiteBottom = whiteBottomNow)
-                    consecutiveValidationFailures = 0
-                    mainHandler.post { tvStatus.text = "⚠️ Tự động ép Vua chống kẹt..." }
-                } else {
-                    mainHandler.post { tvStatus.text = "⏳ Chờ nét ($validationError)... ($consecutiveValidationFailures/5)" }
-                    return
-                }
-            } else {
-                consecutiveValidationFailures = 0
+                mainHandler.post { tvStatus.text = "⚠️ Rác ($validationError) • Đang chỉnh lại khung" }
+                return
             }
 
             val boardFen = buildFenBoardString(standardMatrix)
             mainHandler.post { tvFenDebug.text = "FEN: $boardFen" }
 
-            val myColorChar = if (whiteBottomNow) 'w' else 'b'
-            var activeTurn = forceTurnSide ?: determineSideToMoveAndUpdateHistory(standardMatrix, myColorChar)
+            val myColorChar = if (chessOverlayView.isWhiteBottom) 'w' else 'b'
+            val activeTurn = forceTurnSide ?: determineSideToMoveAndUpdateHistory(standardMatrix, myColorChar)
 
-            val nonMovingCheck = if (myColorChar == 'w') 'b' else 'w'
-            if (forceTurnSide == null && activeTurn != myColorChar) {
-                sameBoardWaitCount++
-                if (sameBoardWaitCount >= 2 && !isKingInCheck(standardMatrix, nonMovingCheck)) {
-                    activeTurn = myColorChar
-                    lastDetectedTurn = myColorChar
-                }
-            } else {
-                sameBoardWaitCount = 0
-            }
-
-            val castlingStr = getValidCastlingString(standardMatrix)
-            val epStr = lastEnPassantTarget
-            val stateKey = "$boardFen|$activeTurn|$castlingStr|$epStr"
+            val stateKey = "$boardFen|$activeTurn"
             latestValidStateKey = stateKey
             val reqGen = stateGeneration.incrementAndGet()
 
-            if (activeTurn != myColorChar) {
-                mainHandler.post { chessOverlayView.setMove(null); tvStatus.text = "⏳ Đợi đối thủ đi..." }
-                return
-            }
-
             if (stateKey == lastCompletedStateKey && chessOverlayView.hasActiveArrow()) return
 
-            val fullFen = "$boardFen $activeTurn $castlingStr $epStr $halfmoveClock $fullmoveNumber"
+            val fullFen = "$boardFen $activeTurn - - 0 1"
             val cachedMove = moveCache[fullFen]
             if (cachedMove != null) {
-                if (latestValidStateKey == stateKey) {
-                    lastCompletedStateKey = stateKey
-                    mainHandler.post { chessOverlayView.setMove(cachedMove); tvStatus.text = "⚡ Đi: ${formatMoveText(cachedMove)}" }
-                }
+                lastCompletedStateKey = stateKey
+                mainHandler.post { chessOverlayView.setMove(cachedMove); tvStatus.text = "⚡ Đi: ${formatMoveText(cachedMove)}" }
                 return
             }
 
@@ -796,13 +748,10 @@ class OverlayService : Service() {
         }
     }
 
-    // ĐÃ FIX TOÁN HỌC: BƯỚC 1: KIỂM TRA VARIANCE | BƯỚC 2: LẤY MÀU NỀN TỪ MÉP Ô | BƯỚC 3: MẶT NẠ CHUẨN
     private fun analyzeCellVariance(boardPixels: IntArray, r: Int, c: Int): CellAnalysis {
-        val baseX = c * 32
-        val baseY = r * 32
-        
-        // BƯỚC 1: KIỂM TRA PHƯƠNG SAI LÕI (Xác định ô trống hay có quân)
+        val baseX = c * 32; val baseY = r * 32
         var sumLum = 0L; var sumSqLum = 0L; var pxCount = 0
+
         for (y in 8..23) {
             val rowOffset = (baseY + y) * 256 + baseX
             for (x in 8..23) {
@@ -818,7 +767,6 @@ class OverlayService : Service() {
 
         if (!isOccupied) return CellAnalysis(false, meanLum, false, 16f, 0f, 0, 32, IntArray(5), 0f)
 
-        // BƯỚC 2: LẤY MÀU NỀN TỪ CẠNH TRÊN/DƯỚI (Không lấy tâm quân cờ)
         val bgSamples = ArrayList<Int>(12)
         for (x in 6..26 step 4) {
             bgSamples.add(boardPixels[(baseY + 2) * 256 + baseX + x])
@@ -828,7 +776,6 @@ class OverlayService : Service() {
             bgSamples.map { color -> (Color.red(color)*299 + Color.green(color)*587 + Color.blue(color)*114)/1000 }.sorted()[bgSamples.size/2]
         }
 
-        // BƯỚC 3: VẼ MẶT NẠ CHUẨN XÁC DỰA VÀO MÀU NỀN (Khắc phục lỗi Inverted Mask)
         var sumX = 0f; var sumY = 0f; var mass = 0; var highestY = 32
         val solidMask = BooleanArray(32 * 32)
         for (y in 4..27) {
@@ -864,7 +811,6 @@ class OverlayService : Service() {
         val cx = if (mass > 0) sumX / mass else 16f
         val asymX = abs(cx - 16f)
         
-        // ĐO ĐỘ SÁNG BỤNG QUÂN CỜ (Phân biệt Trắng Đen)
         var coreLumSum = 0; var corePx = 0
         for(y in 14..22) {
             val rowOffset = (baseY + y) * 256 + baseX
@@ -882,20 +828,16 @@ class OverlayService : Service() {
     }
 
     private fun classifyPiece(r: Int, cell: CellAnalysis): Char {
-        val s0 = cell.sliceWidths[0] // Chóp
-        val s1 = cell.sliceWidths[1] // Đầu
-        val s2 = cell.sliceWidths[2] // Cổ
+        val s0 = cell.sliceWidths[0]
+        val s1 = cell.sliceWidths[1]
+        val s2 = cell.sliceWidths[2]
         
         if (cell.headAsymmetry > 1.8f) return 'N'
-        
         if (r in 1..6 && cell.mass < 220 && cell.highestY >= 8 && s0 <= 4 && s1 <= 9) return 'P'
-        
         if (s0 <= 5 && s1 >= 9 && s1 >= s2) return 'R'
-        
         if (cell.highestY <= 6 && s0 >= 6) {
             return if (s0 >= 9 || s1 >= 11) 'Q' else 'K'
         }
-        
         if (s1 < s2 && s2 >= 8) return 'B'
         
         return if (r == 0 || r == 7) 'R' else 'P'
@@ -931,57 +873,15 @@ class OverlayService : Service() {
         if (wPieces > 16 || bPieces > 16) return "Quá 16 quân"
         return null
     }
-    
-    private fun resolveSideKingQueen(matrix: Array<CharArray>, isWhite: Boolean, cells: Array<Array<CellAnalysis>>, whiteBottom: Boolean) {
-        val kChar = if (isWhite) 'K' else 'k'
-        val qChar = if (isWhite) 'Q' else 'q'
-        val homeR = if (isWhite) 7 else 0
-
-        val kings = mutableListOf<Pair<Int, Int>>()
-        val queens = mutableListOf<Pair<Int, Int>>()
-        val others = mutableListOf<Pair<Int, Int>>()
-
-        for (r in 0..7) for (c in 0..7) {
-            val ch = matrix[r][c]
-            if (ch != '1' && ch.isUpperCase() == isWhite) {
-                if (ch == kChar) kings.add(r to c)
-                else if (ch == qChar) queens.add(r to c)
-                else others.add(r to c)
-            }
-        }
-
-        if (kings.size > 1) {
-            kings.sortBy { (r, c) -> abs(r - homeR) * 10 + abs(c - 4) }
-            for (i in 1 until kings.size) matrix[kings[i].first][kings[i].second] = qChar
-        } else if (kings.isEmpty()) {
-            if (queens.isNotEmpty()) {
-                queens.sortBy { (r, c) -> abs(r - homeR) * 10 + abs(c - 4) }
-                matrix[queens[0].first][queens[0].second] = kChar
-            } else if (others.isNotEmpty()) {
-                others.sortBy { (r, c) ->
-                    val rawR = if (whiteBottom) r else 7 - r
-                    val rawC = if (whiteBottom) c else 7 - c
-                    cells[rawR][rawC].highestY * 15 + abs(r - homeR) * 8 + abs(c - 4)
-                }
-                matrix[others[0].first][others[0].second] = kChar
-            } else {
-                matrix[homeR][4] = kChar
-            }
-        }
-    }
 
     private fun determineSideToMoveAndUpdateHistory(currentMatrix: Array<CharArray>, myColor: Char): Char {
         val startFen = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"
         if (buildFenBoardString(currentMatrix) == startFen) {
             previousValidMatrix = Array(8) { r -> currentMatrix[r].clone() }
-            lastDetectedTurn = 'w'; lastEnPassantTarget = "-"
+            lastDetectedTurn = 'w'
+            lastEnPassantTarget = "-"
             return 'w'
         }
-
-        val wInCheck = isKingInCheck(currentMatrix, 'w')
-        val bInCheck = isKingInCheck(currentMatrix, 'b')
-        if (wInCheck && !bInCheck) { lastDetectedTurn = 'w'; previousValidMatrix = Array(8) { r -> currentMatrix[r].clone() }; return 'w' }
-        if (bInCheck && !wInCheck) { lastDetectedTurn = 'b'; previousValidMatrix = Array(8) { r -> currentMatrix[r].clone() }; return 'b' }
 
         val prev = previousValidMatrix
         if (prev != null) {
@@ -1003,73 +903,6 @@ class OverlayService : Service() {
         lastDetectedTurn = myColor
         previousValidMatrix = Array(8) { r -> currentMatrix[r].clone() }
         return myColor
-    }
-
-    private fun isKingInCheck(matrix: Array<CharArray>, kingSide: Char): Boolean {
-        val kingChar = if (kingSide == 'w') 'K' else 'k'
-        val byWhite = (kingSide == 'b')
-        var kr = -1; var kc = -1
-        for (r in 0..7) for (c in 0..7) {
-            if (matrix[r][c] == kingChar) { kr = r; kc = c; break }
-        }
-        if (kr == -1) return false
-
-        val pawnRow = if (byWhite) kr + 1 else kr - 1
-        val enemyPawn = if (byWhite) 'P' else 'p'
-        if (pawnRow in 0..7) {
-            if (kc - 1 >= 0 && matrix[pawnRow][kc - 1] == enemyPawn) return true
-            if (kc + 1 <= 7 && matrix[pawnRow][kc + 1] == enemyPawn) return true
-        }
-
-        val enemyKnight = if (byWhite) 'N' else 'n'
-        val knightMoves = arrayOf(-2 to -1, -2 to 1, -1 to -2, -1 to 2, 1 to -2, 1 to 2, 2 to -1, 2 to 1)
-        for ((dr, dc) in knightMoves) {
-            val nr = kr + dr; val nc = kc + dc
-            if (nr in 0..7 && nc in 0..7 && matrix[nr][nc] == enemyKnight) return true
-        }
-
-        val enemyRook = if (byWhite) 'R' else 'r'
-        val enemyQueen = if (byWhite) 'Q' else 'q'
-        val orthoDirs = arrayOf(-1 to 0, 1 to 0, 0 to -1, 0 to 1)
-        for ((dr, dc) in orthoDirs) {
-            var r = kr + dr; var c = kc + dc
-            while (r in 0..7 && c in 0..7) {
-                val ch = matrix[r][c]
-                if (ch != '1') {
-                    if (ch == enemyRook || ch == enemyQueen) return true
-                    break
-                }
-                r += dr; c += dc
-            }
-        }
-
-        val enemyBishop = if (byWhite) 'B' else 'b'
-        val diagDirs = arrayOf(-1 to -1, -1 to 1, 1 to -1, 1 to 1)
-        for ((dr, dc) in diagDirs) {
-            var r = kr + dr; var c = kc + dc
-            while (r in 0..7 && c in 0..7) {
-                val ch = matrix[r][c]
-                if (ch != '1') {
-                    if (ch == enemyBishop || ch == enemyQueen) return true
-                    break
-                }
-                r += dr; c += dc
-            }
-        }
-        return false
-    }
-
-    private fun updateCastlingRights(matrix: Array<CharArray>) {
-        if (matrix[7][4] != 'K') wKingMoved = true
-        if (matrix[7][0] != 'R') wRookAMoved = true
-        if (matrix[7][7] != 'R') wRookHMoved = true
-        if (matrix[0][4] != 'k') bKingMoved = true
-        if (matrix[0][0] != 'r') bRookAMoved = true
-        if (matrix[0][7] != 'r') bRookHMoved = true
-    }
-
-    private fun getValidCastlingString(matrix: Array<CharArray>): String {
-        return if (castlingMode == 1) "KQkq" else "-"
     }
 
     private fun raceBothStockfishServers(fen: String): String? {
@@ -1117,7 +950,7 @@ class OverlayService : Service() {
     private fun startForegroundNotification() {
         val channel = NotificationChannel("chess_overlay_channel", "Chess Overlay", NotificationManager.IMPORTANCE_LOW)
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-        val notif = Notification.Builder(this, "chess_overlay_channel").setContentTitle("Chess Pro v7.3").setSmallIcon(android.R.drawable.ic_menu_compass).build()
+        val notif = Notification.Builder(this, "chess_overlay_channel").setContentTitle("Chess Pro v7.3.2").setSmallIcon(android.R.drawable.ic_menu_compass).build()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION) else startForeground(1, notif)
     }
 
