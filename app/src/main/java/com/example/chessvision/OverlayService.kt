@@ -1,5 +1,6 @@
 package com.example.chessvision
 
+import kotlin.math.sqrt
 import android.app.*
 import android.content.Context
 import android.content.Intent
