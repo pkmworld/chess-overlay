@@ -41,7 +41,7 @@ class MainActivity : AppCompatActivity() {
     ) { result ->
         val data = result.data
         if (result.resultCode == Activity.RESULT_OK && data != null) {
-            Toast.makeText(this, "Đang khởi động Chess Pro v9.4...", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Đang khởi động Chess Pro v10.0...", Toast.LENGTH_SHORT).show()
             val serviceIntent = Intent(this, OverlayService::class.java).apply {
                 putExtra("RESULT_CODE", result.resultCode)
                 putExtra("DATA", data)
@@ -57,37 +57,22 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val layout = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            gravity = Gravity.CENTER
-            setPadding(64, 64, 64, 64)
-        }
-        val btnStart = Button(this).apply {
-            text = "KHỞI CHẠY CHESS PRO v9.4"
-            textSize = 18f
-            setOnClickListener { checkPermissionsAndStart() }
-        }
-        layout.addView(btnStart)
-        setContentView(layout)
+        val layout = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; gravity = Gravity.CENTER; setPadding(64, 64, 64, 64) }
+        val btnStart = Button(this).apply { text = "KHỞI CHẠY CHESS PRO v10.0"; textSize = 18f; setOnClickListener { checkPermissionsAndStart() } }
+        layout.addView(btnStart); setContentView(layout)
     }
 
     private fun checkPermissionsAndStart() {
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             if (ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED) {
-                notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
-                return
+                notifPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS); return
             }
         }
         proceedAfterNotifCheck()
     }
 
     private fun proceedAfterNotifCheck() {
-        if (!Settings.canDrawOverlays(this)) {
-            val intent = Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))
-            overlayPermissionLauncher.launch(intent)
-        } else {
-            requestScreenCapture()
-        }
+        if (!Settings.canDrawOverlays(this)) { overlayPermissionLauncher.launch(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName"))) } else { requestScreenCapture() }
     }
 
     private fun requestScreenCapture() {

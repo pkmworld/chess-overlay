@@ -26,9 +26,7 @@ class ChessOverlayView(context: Context) : View(context) {
     private val arrowHeadPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply { color = Color.argb(245, 0, 230, 118); style = Paint.Style.FILL }
 
     fun setMove(uciMove: String?) {
-        if (uciMove != null && uciMove.length >= 4) {
-            fromSquare = uciMove.substring(0, 2); toSquare = uciMove.substring(2, 4)
-        } else { fromSquare = null; toSquare = null }
+        if (uciMove != null && uciMove.length >= 4) { fromSquare = uciMove.substring(0, 2); toSquare = uciMove.substring(2, 4) } else { fromSquare = null; toSquare = null }
         invalidate()
     }
 
@@ -43,8 +41,7 @@ class ChessOverlayView(context: Context) : View(context) {
 
         canvas.save()
         canvas.translate(board.left - offsetX, board.top - offsetY)
-        val size = board.width()
-        val cellSize = size / 8f
+        val size = board.width(); val cellSize = size / 8f
 
         if (isCalibrationMode) {
             canvas.drawRect(0f, 0f, size, size, gridPaint)

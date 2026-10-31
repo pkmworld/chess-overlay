@@ -96,7 +96,7 @@ class OverlayService : Service() {
 
     override fun onCreate() {
         super.onCreate()
-        prefs = getSharedPreferences("VisionPro9_4Prefs", Context.MODE_PRIVATE)
+        prefs = getSharedPreferences("VisionPro10Prefs", Context.MODE_PRIVATE)
         val thread = HandlerThread("ImageCaptureThread").apply { start() }
         bgThread = thread; bgHandler = Handler(thread.looper)
 
@@ -168,75 +168,70 @@ class OverlayService : Service() {
 
     private fun createButton(label: String, colorStr: String, onClick: (Button) -> Unit): Button {
         return Button(this).apply {
-            text = label; textSize = 11.5f; setTextColor(Color.WHITE); background = getBtnBg(colorStr); isAllCaps = false; setPadding(16, 20, 16, 20)
-            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.WRAP_CONTENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(6, 6, 6, 6); weight = 1f }
+            text = label; textSize = 10f; setTextColor(Color.WHITE); background = getBtnBg(colorStr); isAllCaps = false; setPadding(4, 16, 4, 16)
+            layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(4, 4, 4, 4); weight = 1f }
             setOnClickListener { onClick(this) }
         }
     }
 
+    // GIAO DIỆN MỚI: 2 HÀNG NGANG CHỐT HẠ GỌN NHẸ
     private fun setupUI() {
-        mainControlPanel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; background = GradientDrawable().apply { cornerRadius = 32f; setColor(Color.argb(245, 25, 25, 30)); setStroke(2, Color.parseColor("#444444")) }; setPadding(20, 20, 20, 20) }
-        tvStatus = TextView(this).apply { text = "Chess Pro v9.4 • Đã Sửa Lỗi Biên Dịch"; setTextColor(Color.parseColor("#00E676")); textSize = 12.5f; gravity = Gravity.CENTER; setPadding(0, 0, 0, 12) }
-        tvFenDebug = TextView(this).apply { text = "Vui lòng mở Trận Máy & HỌC BỘ CỜ"; setTextColor(Color.parseColor("#f1c40f")); textSize = 10f; gravity = Gravity.CENTER; maxLines = 1; setPadding(0, 0, 0, 12) }
+        mainControlPanel = LinearLayout(this).apply { 
+            orientation = LinearLayout.VERTICAL
+            background = GradientDrawable().apply { cornerRadius = 32f; setColor(Color.argb(245, 25, 25, 30)); setStroke(2, Color.parseColor("#444444")) }
+            setPadding(12, 16, 12, 16) 
+            layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
+        }
+        
+        tvStatus = TextView(this).apply { text = "Chess Pro v10 • Giao Diện Ngang"; setTextColor(Color.parseColor("#00E676")); textSize = 11.5f; gravity = Gravity.CENTER; setPadding(0, 0, 0, 8) }
+        tvFenDebug = TextView(this).apply { text = "Vào Trận Máy & HỌC BỘ CỜ"; setTextColor(Color.parseColor("#f1c40f")); textSize = 9.5f; gravity = Gravity.CENTER; maxLines = 1; setPadding(0, 0, 0, 12) }
 
-        val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        btnSide = createButton("⚪ Phe: Trắng", "#2980b9") {
-            chessOverlayView.isWhiteBottom = !chessOverlayView.isWhiteBottom; btnSide.text = if (chessOverlayView.isWhiteBottom) "⚪ Phe: Trắng" else "⚫ Phe: Đen"
+        val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT) }
+        btnSide = createButton("⚪ Phe", "#2980b9") {
+            chessOverlayView.isWhiteBottom = !chessOverlayView.isWhiteBottom; btnSide.text = if (chessOverlayView.isWhiteBottom) "⚪ Phe" else "⚫ Phe"
             resetState()
         }
-        btnTurn = createButton("🔄 Lượt: Auto", "#2980b9") {
+        btnTurn = createButton("🔄 Lượt", "#2980b9") {
             forceTurnSide = when (forceTurnSide) { null -> if (chessOverlayView.isWhiteBottom) 'w' else 'b'; 'w' -> 'b'; else -> null }
-            btnTurn.text = when (forceTurnSide) { 'w' -> "⚡ Lượt: Trắng"; 'b' -> "⚡ Lượt: Đen"; else -> "🔄 Lượt: Auto" }
+            btnTurn.text = when (forceTurnSide) { 'w' -> "⚡ Trắng"; 'b' -> "⚡ Đen"; else -> "🔄 Lượt" }
             resetState()
         }
-        row1.addView(btnSide); row1.addView(btnTurn)
-
-        val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        row2.addView(createButton("🎯 Chỉnh Khung", "#8e44ad") { mainControlPanel.visibility = View.GONE; calibControlPanel.visibility = View.VISIBLE; chessOverlayView.isCalibrationMode = true; chessOverlayView.invalidate() })
-        row2.addView(createButton("📸 HỌC BỘ CỜ", "#f39c12") {
+        val btnCalib = createButton("🎯 Khung", "#8e44ad") { mainControlPanel.visibility = View.GONE; calibControlPanel.visibility = View.VISIBLE; chessOverlayView.isCalibrationMode = true; chessOverlayView.invalidate() }
+        val btnLearn = createButton("📸 Học", "#f39c12") {
             isAutoMode = false; mainHandler.removeCallbacks(autoLoopRunnable)
             isLearningMode = true; requestCleanCapture(manualTrigger = true)
-            Toast.makeText(this@OverlayService, "Đang chụp ảnh bộ cờ...", Toast.LENGTH_SHORT).show()
-        })
-        
-        val row3 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
-        row3.addView(createButton("👁️ Sửa Bảng", "#d35400") {
-            if (validMatrix == null) { 
-                Toast.makeText(this@OverlayService, "Hãy Quét 1 lần trước!", Toast.LENGTH_SHORT).show()
-            } else {
-                isAutoMode = false; mainControlPanel.visibility = View.GONE; manualEditorPanel.visibility = View.VISIBLE
-                buildEditorGridUI()
-            }
-        })
-        row3.addView(createButton("⚡ Quét", "#27ae60") {
-            if (imageTemplates.isEmpty()) { 
-                Toast.makeText(this@OverlayService, "Chưa nạp ảnh cờ!", Toast.LENGTH_LONG).show()
-            } else {
-                resetState(); requestCleanCapture(true)
-            }
-        })
+            Toast.makeText(this@OverlayService, "Đang nạp ảnh... Nếu lỗi hãy vuốt màn hình!", Toast.LENGTH_SHORT).show()
+        }
+        row1.addView(btnSide); row1.addView(btnTurn); row1.addView(btnCalib); row1.addView(btnLearn)
 
-        val row4 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+        val row2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT) }
+        val btnEdit = createButton("👁️ Sửa", "#d35400") {
+            if (validMatrix == null) { Toast.makeText(this@OverlayService, "Hãy Quét 1 lần trước!", Toast.LENGTH_SHORT).show() } 
+            else { isAutoMode = false; mainControlPanel.visibility = View.GONE; manualEditorPanel.visibility = View.VISIBLE; buildEditorGridUI() }
+        }
+        val btnScan = createButton("⚡ Quét", "#27ae60") {
+            if (imageTemplates.isEmpty()) { Toast.makeText(this@OverlayService, "Chưa nạp ảnh cờ!", Toast.LENGTH_LONG).show() } 
+            else { resetState(); requestCleanCapture(true) }
+        }
         val btnAuto = createButton("▶ Auto", "#27ae60") { btn ->
-            if (imageTemplates.isEmpty()) { 
-                Toast.makeText(this@OverlayService, "Chưa nạp ảnh cờ!", Toast.LENGTH_LONG).show()
-            } else {
+            if (imageTemplates.isEmpty()) { Toast.makeText(this@OverlayService, "Chưa nạp ảnh cờ!", Toast.LENGTH_LONG).show() } 
+            else {
                 isAutoMode = !isAutoMode; mainHandler.removeCallbacks(autoLoopRunnable)
                 if (isAutoMode) { btn.text = "⏸ Dừng"; resetState(); mainHandler.post(autoLoopRunnable) } else { btn.text = "▶ Auto"; tvStatus.text = "Đã tạm dừng." }
             }
         }
-        val btnClose = createButton("✕ Đóng App", "#c0392b") { stopSelf() }
-        row4.addView(btnAuto); row4.addView(btnClose)
+        val btnClose = createButton("✕ Đóng", "#c0392b") { stopSelf() }
+        row2.addView(btnEdit); row2.addView(btnScan); row2.addView(btnAuto); row2.addView(btnClose)
 
         mainControlPanel.addView(tvStatus); mainControlPanel.addView(tvFenDebug)
-        mainControlPanel.addView(row1); mainControlPanel.addView(row2); mainControlPanel.addView(row3); mainControlPanel.addView(row4)
+        mainControlPanel.addView(row1); mainControlPanel.addView(row2)
 
         // CHỈNH KHUNG PANEL
         calibControlPanel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; background = GradientDrawable().apply { cornerRadius = 32f; setColor(Color.argb(250, 40, 20, 60)) }; setPadding(24, 20, 24, 20); visibility = View.GONE }
         val tvCalib = TextView(this).apply { text = "Dùng các nút dưới để khớp Lưới Đỏ"; setTextColor(Color.WHITE); gravity = Gravity.CENTER; setPadding(0,0,0,16) }
         val cRow1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }; cRow1.addView(createButton("▲ Lên", "#555555") { moveBoard(0f, -6f) }); cRow1.addView(createButton("▼ Xuống", "#555555") { moveBoard(0f, 6f) })
         val cRow2 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }; cRow2.addView(createButton("◀ Trái", "#555555") { moveBoard(-6f, 0f) }); cRow2.addView(createButton("▶ Phải", "#555555") { moveBoard(6f, 0f) })
-        val cRow3 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }; cRow3.addView(createButton("➕ To ra", "#34495e") { scaleBoard(8f) }); cRow3.addView(createButton("➖ Nhỏ lại", "#34495e") { scaleBoard(-8f) })
+        val cRow3 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }; cRow3.addView(createButton("➕ To", "#34495e") { scaleBoard(8f) }); cRow3.addView(createButton("➖ Nhỏ", "#34495e") { scaleBoard(-8f) })
         val cRow4 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         cRow4.addView(createButton("❌ HỦY", "#c0392b") { calibControlPanel.visibility = View.GONE; mainControlPanel.visibility = View.VISIBLE; chessOverlayView.isCalibrationMode = false; chessOverlayView.invalidate() })
         cRow4.addView(createButton("✔️ LƯU", "#27ae60") {
@@ -247,11 +242,11 @@ class OverlayService : Service() {
 
         // BẢNG SỬA QUÂN (SOLID GRID EDITOR)
         manualEditorPanel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; background = GradientDrawable().apply { cornerRadius = 32f; setColor(Color.argb(255, 35, 35, 45)); setStroke(4, Color.parseColor("#d35400")) }; setPadding(16, 24, 16, 24); visibility = View.GONE }
-        val tvEditTitle = TextView(this).apply { text = "SỬA BÀN CỜ THỦ CÔNG"; setTextColor(Color.WHITE); textSize = 16f; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER; setPadding(0,0,0,16) }
+        val tvEditTitle = TextView(this).apply { text = "SỬA BÀN CỜ"; setTextColor(Color.WHITE); textSize = 16f; typeface = Typeface.DEFAULT_BOLD; gravity = Gravity.CENTER; setPadding(0,0,0,16) }
         editorGridContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; setPadding(0,0,0,24) }
         val eRowActions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER }
         eRowActions.addView(createButton("❌ HỦY", "#c0392b") { manualEditorPanel.visibility = View.GONE; mainControlPanel.visibility = View.VISIBLE })
-        eRowActions.addView(createButton("✔️ LƯU & TÍNH NƯỚC", "#27ae60") { manualEditorPanel.visibility = View.GONE; mainControlPanel.visibility = View.VISIBLE; forceEvaluateMatrix() })
+        eRowActions.addView(createButton("✔️ LƯU & TÍNH", "#27ae60") { manualEditorPanel.visibility = View.GONE; mainControlPanel.visibility = View.VISIBLE; forceEvaluateMatrix() })
         manualEditorPanel.addView(tvEditTitle); manualEditorPanel.addView(editorGridContainer); manualEditorPanel.addView(eRowActions)
 
         val rootContainer = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(mainControlPanel); addView(calibControlPanel); addView(manualEditorPanel) }
@@ -283,7 +278,7 @@ class OverlayService : Service() {
                     if (ch != '1') {
                         val isW = ch.isUpperCase()
                         val n = when(ch.uppercaseChar()) { 'P'->"TỐT"; 'N'->"MÃ"; 'B'->"TƯỢNG"; 'R'->"XE"; 'Q'->"HẬU"; 'K'->"VUA"; else->"" }
-                        text = if (isW) "$n\n⚪" else "$n\n⚫"; setTextColor(if (isW) Color.BLACK else Color.WHITE); textSize = 9f
+                        text = if (isW) "$n\n⚪" else "$n\n⚫"; setTextColor(if (isW) Color.BLACK else Color.WHITE); textSize = 8.5f
                     }
                     setOnClickListener { showPieceEditorPopup(actualR, actualC) }
                 }
@@ -301,7 +296,7 @@ class OverlayService : Service() {
 
         fun createPieceBtn(label: String, ch: Char, isWhite: Boolean): Button {
             return Button(this).apply {
-                text = label; textSize = 12f; isAllCaps = false; setTextColor(if (isWhite) Color.BLACK else Color.WHITE)
+                text = label; textSize = 11f; isAllCaps = false; setTextColor(if (isWhite) Color.BLACK else Color.WHITE)
                 background = getBtnBg(if (isWhite) "#ecf0f1" else "#2c3e50")
                 layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT).apply { weight = 1f; setMargins(4,4,4,4) }
                 setOnClickListener { validMatrix?.get(r)?.set(c, ch); buildEditorGridUI(); windowManager.removeView(popup); pieceEditorPopup = null }
@@ -315,7 +310,7 @@ class OverlayService : Service() {
         
         val btnClear = createButton("❌ XÓA TRỐNG", "#c0392b") { validMatrix?.get(r)?.set(c, '1'); buildEditorGridUI(); windowManager.removeView(popup); pieceEditorPopup = null }
         btnClear.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 24, 0, 0) }
-        val btnCancel = createButton("HỦY ĐÓNG", "#7f8c8d") { windowManager.removeView(popup); pieceEditorPopup = null }
+        val btnCancel = createButton("HỦY", "#7f8c8d") { windowManager.removeView(popup); pieceEditorPopup = null }
         btnCancel.layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(0, 8, 0, 0) }
 
         popup.addView(rowW1); popup.addView(rowW2); popup.addView(View(this).apply { layoutParams = LinearLayout.LayoutParams(1, 24) }); popup.addView(rowB1); popup.addView(rowB2); popup.addView(btnClear); popup.addView(btnCancel)
@@ -363,6 +358,7 @@ class OverlayService : Service() {
         virtualDisplay = mp.createVirtualDisplay("ChessProCapture", screenWidth, screenHeight, screenDensity, DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR, imageReader?.surface, null, null)
     }
 
+    // CHỐT HẠ FIX LỖI TÀNG HÌNH VÀ TĂNG DELAY
     private fun requestCleanCapture(manualTrigger: Boolean) {
         if (isProcessing.get() || waitingForCleanFrame || chessOverlayView.isCalibrationMode) return
         mainHandler.post {
@@ -388,6 +384,7 @@ class OverlayService : Service() {
                 mainControlPanel.alpha = if (mainControlPanel.alpha < 0.99f) 1.0f else 0.985f
                 mainControlPanel.invalidate()
 
+                // Tăng delay lên 150ms để ép Android nôn ảnh ra
                 bgHandler?.postDelayed({
                     if (waitingForCleanFrame && !isProcessing.get()) {
                         val img = try { imageReader?.acquireLatestImage() } catch (_: Exception) { null }
@@ -407,10 +404,21 @@ class OverlayService : Service() {
                                 waitingForCleanFrame = false; mainHandler.post { chessOverlayView.visibility = View.VISIBLE }
                                 if (isLearningMode) workerExecutor.execute { processLearningCapture(fb) }
                                 else workerExecutor.execute { processCapturedBitmap(fb) }
-                            } else { fb?.recycle(); waitingForCleanFrame = false; mainHandler.post { chessOverlayView.visibility = View.VISIBLE } }
+                            } else {
+                                // XỬ LÝ LỖI TRƯNG RA CHO NGƯỜI DÙNG THẤY!
+                                fb?.recycle(); waitingForCleanFrame = false; 
+                                mainHandler.post { 
+                                    chessOverlayView.visibility = View.VISIBLE 
+                                    if (isLearningMode) {
+                                        Toast.makeText(this@OverlayService, "LỖI CHỤP: Màn hình bị đứng. Hãy vuốt/chạm nhẹ bàn cờ rồi bấm HỌC lại!", Toast.LENGTH_LONG).show()
+                                        isLearningMode = false
+                                        tvStatus.text = "Chụp thất bại, hãy vuốt màn hình!"
+                                    }
+                                }
+                            }
                         }
                     }
-                }, 85L)
+                }, 150L)
             }
         }
     }
@@ -490,7 +498,7 @@ class OverlayService : Service() {
             imageTemplates['p'] = extractCellCoreColors(boardPixels, bpRow, 4)
             
             saveTemplatesToDisk()
-            mainHandler.post { tvStatus.text = "✅ ĐÃ HỌC XONG BỘ CỜ MỚI!"; tvFenDebug.text = "Dữ liệu ảnh mẫu đã được lưu vào máy"; Toast.makeText(this@OverlayService, "Đã lưu 12 ảnh mẫu vào bộ nhớ!", Toast.LENGTH_LONG).show() }
+            mainHandler.post { tvStatus.text = "✅ ĐÃ HỌC XONG BỘ CỜ MỚI!"; tvFenDebug.text = "Dữ liệu ảnh mẫu đã được lưu vào máy"; Toast.makeText(this@OverlayService, "Đã nạp đủ 12 quân cờ, xin mời Auto!", Toast.LENGTH_LONG).show() }
         } catch (e: Exception) { mainHandler.post { Toast.makeText(this@OverlayService, "Lỗi học ảnh: ${e.message}", Toast.LENGTH_LONG).show() }
         } finally { fullBmp.recycle(); isLearningMode = false; isProcessing.set(false) }
     }
@@ -499,7 +507,7 @@ class OverlayService : Service() {
         try {
             val boardRect = detectedBoardRect
             if (boardRect == null) { mainHandler.post { tvStatus.text = "⚠️ Hãy chỉnh khung bàn cờ trước" }; return }
-            if (imageTemplates.size < 12) { mainHandler.post { tvStatus.text = "⚠️ BẠN CHƯA BẤM NÚT [HỌC BỘ CỜ]" }; return }
+            if (imageTemplates.size < 12) { mainHandler.post { tvStatus.text = "⚠️ BẠN CHƯA NẠP ẢNH MẪU!" }; return }
 
             val bLeft = boardRect.left.toInt().coerceIn(0, fullBmp.width - 64); val bTop = boardRect.top.toInt().coerceIn(0, fullBmp.height - 64)
             val bSize = boardRect.width().toInt().coerceIn(64, min(fullBmp.width - bLeft, fullBmp.height - bTop))
@@ -536,7 +544,7 @@ class OverlayService : Service() {
             val cachedMove = moveCache[fullFen]
             if (cachedMove != null) { lastCompletedStateKey = stateKey; mainHandler.post { chessOverlayView.setMove(cachedMove); tvStatus.text = "⚡ Đi: ${formatMoveText(cachedMove)}" }; return }
 
-            mainHandler.post { tvStatus.text = "⚡ Đang tính (Template Match)..." }
+            mainHandler.post { tvStatus.text = "⚡ Đang tính..." }
             var bestMove = raceBothStockfishServers(fullFen)
             if (bestMove == null) bestMove = raceBothStockfishServers("$boardFen $myColorChar - - 0 1")
 
@@ -664,7 +672,7 @@ class OverlayService : Service() {
     private fun startForegroundNotification() {
         val channel = NotificationChannel("chess_overlay_channel", "Chess Overlay", NotificationManager.IMPORTANCE_LOW)
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-        val notif = Notification.Builder(this, "chess_overlay_channel").setContentTitle("Chess Pro v9.4").setSmallIcon(android.R.drawable.ic_menu_compass).build()
+        val notif = Notification.Builder(this, "chess_overlay_channel").setContentTitle("Chess Pro v10").setSmallIcon(android.R.drawable.ic_menu_compass).build()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION) else startForeground(1, notif)
     }
 
