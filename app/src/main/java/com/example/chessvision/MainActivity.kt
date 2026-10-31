@@ -63,7 +63,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(64, 64, 64, 64)
         }
         val btnStart = Button(this).apply {
-            text = "KHỞI CHẠY CHESS PRO v7.3"
+            text = "KHỞI CHẠY CHESS PRO"
             textSize = 18f
             setOnClickListener { checkPermissionsAndStart() }
         }
