@@ -9,7 +9,7 @@
 
     <application
         android:allowBackup="true"
-        android:label="Chess Vision v6.5 AntiFreeze"
+        android:label="Chess Vision v6.6 Fix"
         android:supportsRtl="true"
         android:theme="@style/Theme.AppCompat.Light.NoActionBar">
 

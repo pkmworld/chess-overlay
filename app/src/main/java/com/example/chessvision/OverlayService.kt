@@ -87,7 +87,6 @@ class OverlayService : Service() {
     @Volatile private var lastCompletedStateKey = ""
     @Volatile private var sameBoardWaitCount = 0
 
-    // BỘ ĐẾM KIỂM SOÁT "VÒNG LẶP TỬ THẦN"
     @Volatile private var consecutiveValidationFailures = 0
 
     @Volatile private var forceTurnSide: Char? = null
@@ -159,11 +158,7 @@ class OverlayService : Service() {
     override fun onConfigurationChanged(newConfig: Configuration) {
         super.onConfigurationChanged(newConfig)
         updateScreenMetrics()
-        resetBoardAlignment()
-        recreateVirtualDisplay()
-    }
-
-    private fun resetBoardAlignment() {
+        // Khi xoay màn hình, bắt buộc phải dò lại
         detectedBoardRect = null
         mainHandler.post {
             if (::chessOverlayView.isInitialized) {
@@ -171,6 +166,7 @@ class OverlayService : Service() {
                 chessOverlayView.setMove(null)
             }
         }
+        recreateVirtualDisplay()
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -221,11 +217,20 @@ class OverlayService : Service() {
     private fun setupBoardOverlay() {
         chessOverlayView = ChessOverlayView(this)
         val savedTopY = prefs.getFloat("SAVED_BOARD_TOP_Y", -1f)
-        if (savedTopY > 10f && savedTopY + screenWidth <= screenHeight) {
-            val rect = RectF(0f, savedTopY, screenWidth.toFloat(), savedTopY + screenWidth)
+        val minDim = min(screenWidth, screenHeight)
+        
+        // Nếu có tọa độ cũ hợp lệ thì dùng, nếu không thì ném khung vuông ra CHÍNH GIỮA màn hình để user dễ bấm ▲/▼
+        if (savedTopY > 10f && savedTopY + minDim <= screenHeight) {
+            val rect = RectF(0f, savedTopY, minDim.toFloat(), savedTopY + minDim)
+            detectedBoardRect = rect
+            chessOverlayView.detectedBoardRect = rect
+        } else {
+            val defTopY = (screenHeight - minDim) / 2f
+            val rect = RectF(0f, defTopY, minDim.toFloat(), defTopY + minDim)
             detectedBoardRect = rect
             chessOverlayView.detectedBoardRect = rect
         }
+        
         val params = WindowManager.LayoutParams(
             WindowManager.LayoutParams.MATCH_PARENT, WindowManager.LayoutParams.MATCH_PARENT,
             WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY,
@@ -242,7 +247,7 @@ class OverlayService : Service() {
             setPadding(14, 8, 14, 8)
         }
         tvStatus = TextView(this).apply {
-            text = "AntiFreeze v6.5 • Tự động giải lỗi Vua"
+            text = "Bản v6.6 • Chỉnh khung bằng ▲/▼ (Khung ghim chết)"
             setTextColor(Color.parseColor("#69F0AE"))
             textSize = 11f
         }
@@ -281,17 +286,6 @@ class OverlayService : Service() {
             requestCleanCapture(manualTrigger = true)
         }
 
-        btnCastle = createButton("🏰 KQ: Auto") {
-            castlingMode = (castlingMode + 1) % 3
-            btnCastle.text = when (castlingMode) {
-                0 -> "🏰 KQ: Auto"
-                1 -> "🏰 KQ: Bật"
-                else -> "🏰 KQ: Tắt"
-            }
-            lastCompletedStateKey = ""
-            requestCleanCapture(manualTrigger = true)
-        }
-
         val btnAuto = createButton("▶ Auto") { btn ->
             isAutoMode = !isAutoMode
             mainHandler.removeCallbacks(autoLoopRunnable)
@@ -307,17 +301,22 @@ class OverlayService : Service() {
             }
         }
 
-        val btnScan = createButton("⚡ Quét") {
+        val btnScan = createButton("⚡ Quét & Fix") {
             lastCompletedStateKey = ""
             sameBoardWaitCount = 10
+            // Nút "Quét" là nút DUY NHẤT được quyền làm reset vị trí và trí nhớ để tìm lại bàn cờ tự động
+            detectedBoardRect = null
+            dualTemplates.clear()
+            consecutiveValidationFailures = 0
             requestCleanCapture(manualTrigger = true)
         }
 
-        val btnUp = createButton("▲") { nudgeBoardY(-10f) }
-        val btnDown = createButton("▼") { nudgeBoardY(10f) }
+        // KHI BẤM LÊN XUỐNG: RESET LỖI, ÉP QUÉT LẠI MÀ KHÔNG ĐƯỢC RESET TỌA ĐỘ
+        val btnUp = createButton("▲") { nudgeBoardY(-8f) }
+        val btnDown = createButton("▼") { nudgeBoardY(8f) }
         val btnClose = createButton("✕") { stopSelf() }
 
-        row.addView(btnSide); row.addView(btnTurn); row.addView(btnCastle)
+        row.addView(btnSide); row.addView(btnTurn)
         row.addView(btnAuto); row.addView(btnScan); row.addView(btnUp); row.addView(btnDown); row.addView(btnClose)
         controlLayout.addView(tvStatus); controlLayout.addView(tvFenDebug); controlLayout.addView(row)
 
@@ -356,10 +355,16 @@ class OverlayService : Service() {
         val size = current.width()
         val newTop = (current.top + deltaY).coerceIn(40f, (screenHeight - size - 10f).coerceAtLeast(40f))
         val newRect = RectF(current.left, newTop, current.left + size, newTop + size)
+        
+        // GHIM CHẶT KHUNG VÀO VỊ TRÍ MỚI VÀ LƯU LẠI
         detectedBoardRect = newRect
         prefs.edit().putFloat("SAVED_BOARD_TOP_Y", newTop).apply()
+        
         chessOverlayView.detectedBoardRect = newRect
         chessOverlayView.invalidate()
+        
+        // BẢO VỆ NGƯỜI DÙNG: Hủy lỗi để không bị tính năng "Tự chữa lành" quét văng khung đi mất
+        consecutiveValidationFailures = 0
         lastCompletedStateKey = ""
         sameBoardWaitCount = 10
         requestCleanCapture(manualTrigger = true)
@@ -560,7 +565,12 @@ class OverlayService : Service() {
             }
         }
 
-        if (bestTopY < 0) return null
+        if (bestTopY < 0) {
+            // KHÔNG BAO GIỜ TRẢ VỀ NULL LÀM BIẾN MẤT KHUNG. TRẢ VỀ CHÍNH GIỮA MÀN HÌNH LÀM FALLBACK!
+            val defY = (h - bSize) / 2f
+            return RectF(leftX.toFloat(), defY, (leftX + bSize).toFloat(), defY + bSize)
+        }
+        
         prefs.edit().putFloat("SAVED_BOARD_TOP_Y", bestTopY.toFloat()).apply()
         return RectF(leftX.toFloat(), bestTopY.toFloat(), (leftX + bSize).toFloat(), (bestTopY + bSize).toFloat())
     }
@@ -570,10 +580,7 @@ class OverlayService : Service() {
             var boardRect = detectedBoardRect
             if (boardRect == null) {
                 boardRect = detectBoardRect2D(fullBmp)
-                if (boardRect == null) {
-                    mainHandler.post { tvStatus.text = "⚠️ Chưa thấy bàn cờ • Bấm ▲/▼ để khớp góc" }
-                    return
-                }
+                if (boardRect == null) return // Cực hiếm khi xảy ra vì đã có fallback
                 detectedBoardRect = boardRect
                 mainHandler.post {
                     chessOverlayView.detectedBoardRect = boardRect
@@ -638,21 +645,21 @@ class OverlayService : Service() {
 
             enforcePieceCountSanity(standardMatrix, cells, whiteBottomNow)
 
-            // CƠ CHẾ TỰ ĐỘNG CHỮA LÀNH VÀ ÉP VUA (SMART KING FORCING)
             val validationError = validateAndResolveChessPositionStrict(standardMatrix, cells, whiteBottomNow)
             if (validationError != null) {
                 consecutiveValidationFailures++
-                if (consecutiveValidationFailures >= 4) {
-                    // XÓA SẠCH TRÍ NHỚ (AUTO-AMNESIA) ĐỂ CHỐNG VÒNG LẶP TỬ THẦN
+                if (consecutiveValidationFailures >= 5) {
+                    // TỰ CHỮA LÀNH ĐÃ ĐƯỢC FIX: CHỈ XÓA TEMPLATE QUÂN CỜ, TUYỆT ĐỐI KHÔNG XÓA TỌA ĐỘ detectedBoardRect !!!
                     dualTemplates.clear()
-                    detectedBoardRect = null
                     consecutiveValidationFailures = 0
-                    mainHandler.post { tvStatus.text = "⚠️ Xóa bộ nhớ & Quét lại toàn bộ bàn cờ..." }
+                    mainHandler.post { tvStatus.text = "⚠️ Quên hình mẫu & học lại (Giữ nguyên khung)..." }
                 } else {
-                    mainHandler.post { tvStatus.text = "⏳ Lấy nét lại ($validationError)... ($consecutiveValidationFailures/4)" }
+                    mainHandler.post { tvStatus.text = "⏳ Chờ nét ($validationError)... ($consecutiveValidationFailures/5)" }
                 }
                 return
             }
+            
+            // Nếu khung hình hợp lệ, phải reset lỗi ngay lập tức
             consecutiveValidationFailures = 0
 
             val boardFen = buildFenBoardString(standardMatrix)
@@ -683,7 +690,7 @@ class OverlayService : Service() {
             if (activeTurn != myColorChar) {
                 mainHandler.post {
                     chessOverlayView.setMove(null)
-                    tvStatus.text = "⏳ Đợi đối thủ đi... (Ép gợi ý sau 1.5s nếu đến lượt)"
+                    tvStatus.text = "⏳ Đợi đối thủ đi..."
                 }
                 return
             }
@@ -691,20 +698,19 @@ class OverlayService : Service() {
             if (stateKey == lastCompletedStateKey && chessOverlayView.hasActiveArrow()) return
 
             val fullFen = "$boardFen $activeTurn $castlingStr $epStr $halfmoveClock $fullmoveNumber"
-
             val cachedMove = moveCache[fullFen]
             if (cachedMove != null) {
                 if (latestValidStateKey == stateKey) {
                     lastCompletedStateKey = stateKey
                     mainHandler.post {
                         chessOverlayView.setMove(cachedMove)
-                        tvStatus.text = "⚡ Đi ngay: ${formatMoveText(cachedMove)}"
+                        tvStatus.text = "⚡ Đi: ${formatMoveText(cachedMove)}"
                     }
                 }
                 return
             }
 
-            mainHandler.post { tvStatus.text = "⚡ Đang tính nước tối ưu..." }
+            mainHandler.post { tvStatus.text = "⚡ Đang tính..." }
 
             var bestMove = raceBothStockfishServers(fullFen)
             if (bestMove == null) {
@@ -721,11 +727,11 @@ class OverlayService : Service() {
                     chessOverlayView.setMove(bestMove)
                     tvStatus.text = "✅ Đề xuất: ${formatMoveText(bestMove)}"
                 } else {
-                    tvStatus.text = "⏳ Đang quét lại thế cờ..."
+                    tvStatus.text = "⏳ Lỗi API, thử lại..."
                 }
             }
         } catch (e: Exception) {
-            mainHandler.post { tvStatus.text = "Lỗi xử lý: ${e.message}" }
+            mainHandler.post { tvStatus.text = "Lỗi: ${e.message}" }
         } finally {
             fullBmp.recycle()
             isProcessing.set(false)
@@ -995,7 +1001,6 @@ class OverlayService : Service() {
                 bestMatch = ch.uppercaseChar()
             }
         }
-        // Hạ ngưỡng ZNCC để bao dung với hiệu ứng bóng đổ của Chess.com
         if (bestCorr > 0.64f) return bestMatch
 
         if (cell.headAsymmetry >= 0.20f) return 'N'
@@ -1049,7 +1054,6 @@ class OverlayService : Service() {
         }
     }
 
-    // ÉP TÌM VUA THÔNG MINH KHI BỊ NHIỄU (SMART KING FORCING)
     private fun validateAndResolveChessPositionStrict(matrix: Array<CharArray>, cells: Array<Array<CellAnalysis>>, whiteBottom: Boolean): String? {
         resolveSideKingQueen(matrix, isWhite = true, cells = cells, whiteBottom = whiteBottom)
         resolveSideKingQueen(matrix, isWhite = false, cells = cells, whiteBottom = whiteBottom)
@@ -1105,7 +1109,6 @@ class OverlayService : Service() {
                 queens.sortBy { (r, c) -> abs(r - homeR) * 10 + abs(c - 4) }
                 matrix[queens[0].first][queens[0].second] = kChar
             } else if (others.isNotEmpty()) {
-                // Ép quân to nhất và gần gốc Vua nhất thành Vua để chữa cháy ngay lập tức!
                 others.sortBy { (r, c) ->
                     val rawR = if (whiteBottom) r else 7 - r
                     val rawC = if (whiteBottom) c else 7 - c
@@ -1414,7 +1417,7 @@ class OverlayService : Service() {
         val channel = NotificationChannel(channelId, "Chess Overlay", NotificationManager.IMPORTANCE_LOW)
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
         val notif = Notification.Builder(this, channelId)
-            .setContentTitle("Turbo Vision v6.5")
+            .setContentTitle("Turbo Vision v6.6")
             .setSmallIcon(android.R.drawable.ic_menu_compass)
             .build()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {

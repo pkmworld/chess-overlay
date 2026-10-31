@@ -41,7 +41,7 @@ class MainActivity : AppCompatActivity() {
     ) { result ->
         val data = result.data
         if (result.resultCode == Activity.RESULT_OK && data != null) {
-            Toast.makeText(this, "Đang bật v6.5 (Tự Chữa Lành)...", Toast.LENGTH_SHORT).show()
+            Toast.makeText(this, "Đang bật v6.6 (Chống giật khung)...", Toast.LENGTH_SHORT).show()
             val serviceIntent = Intent(this, OverlayService::class.java).apply {
                 putExtra("RESULT_CODE", result.resultCode)
                 putExtra("DATA", data)
@@ -63,7 +63,7 @@ class MainActivity : AppCompatActivity() {
             setPadding(64, 64, 64, 64)
         }
         val btnStart = Button(this).apply {
-            text = "KHỞI CHẠY VISION v6.5"
+            text = "KHỞI CHẠY VISION v6.6"
             textSize = 18f
             setOnClickListener { checkPermissionsAndStart() }
         }

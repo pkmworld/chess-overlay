@@ -19,9 +19,9 @@ class ChessOverlayView(context: Context) : View(context) {
     private var promotionPiece: Char? = null
 
     private val cornerPaint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
-        color = Color.argb(195, 0, 230, 118)
+        color = Color.argb(220, 0, 230, 118) // Tăng độ đậm của 4 góc để dễ nhìn
         style = Paint.Style.STROKE
-        strokeWidth = 5f
+        strokeWidth = 6f
         strokeCap = Paint.Cap.ROUND
     }
 
@@ -83,7 +83,8 @@ class ChessOverlayView(context: Context) : View(context) {
         val size = board.width()
         val cellSize = size / 8f
 
-        val len = 28f
+        // VẼ 4 GÓC LUÔN LUÔN HIỂN THỊ ĐỂ NGƯỜI DÙNG CĂN CHỈNH BẰNG NÚT LÊN XUỐNG
+        val len = 32f
         canvas.drawLine(0f, 0f, len, 0f, cornerPaint); canvas.drawLine(0f, 0f, 0f, len, cornerPaint)
         canvas.drawLine(size - len, 0f, size, 0f, cornerPaint); canvas.drawLine(size, 0f, size, len, cornerPaint)
         canvas.drawLine(0f, size - len, 0f, size, cornerPaint); canvas.drawLine(0f, size, len, size, cornerPaint)
