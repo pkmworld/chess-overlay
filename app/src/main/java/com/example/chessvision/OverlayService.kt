@@ -13,6 +13,7 @@ import android.media.projection.MediaProjection
 import android.media.projection.MediaProjectionManager
 import android.os.*
 import android.util.DisplayMetrics
+import android.util.Log
 import android.view.*
 import android.widget.*
 import org.json.JSONObject
@@ -45,6 +46,8 @@ class OverlayService : Service() {
         private const val NUDGE_COUNT = 8
         private const val START_BOARD = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"
         private const val PIECE_TYPES = "PNBRQK"
+        private const val API_TIMEOUT_MS = 7000
+        private const val API_TOTAL_MS = 8000L
     }
 
     private lateinit var windowManager: WindowManager
@@ -810,6 +813,7 @@ class OverlayService : Service() {
             mainHandler.post { chessOverlayView.setMove(null); tvStatus.text = "⚡ Đang tính..." }
             val bestMove = raceBothStockfishServers(fullFen)
 
+            val apiErr = if (bestMove == null) apiErrorSummary() else ""
             // Người dùng đã đổi phe/lượt/quét lại trong lúc chờ API -> bỏ kết quả cũ
             if (stateGeneration.get() != gen) return
 
@@ -821,7 +825,8 @@ class OverlayService : Service() {
                     chessOverlayView.setMove(bestMove)
                     tvStatus.text = "✅ Đề xuất: ${formatMoveText(bestMove)}"
                 } else {
-                    tvStatus.text = "⏳ Lỗi API, thử lại..."
+                    tvStatus.text = "⏳ Lỗi API: $apiErr"
+                    tvFenDebug.text = fullFen
                 }
             }
         } catch (e: Exception) {
@@ -1050,13 +1055,14 @@ class OverlayService : Service() {
 
         workerExecutor.execute {
             val move = moveCache[fullFen] ?: raceBothStockfishServers(fullFen)
+            val apiErr = if (move == null) apiErrorSummary() else ""
             if (stateGeneration.get() != gen) return@execute
             mainHandler.post {
                 if (move != null && move.length >= 4) {
                     if (moveCache.size > 400) moveCache.clear()
                     moveCache[fullFen] = move; lastCompletedStateKey = stateKey; chessOverlayView.setMove(move)
                     tvStatus.text = "✅ Đề xuất: ${formatMoveText(move)}"
-                } else tvStatus.text = "⏳ Lỗi API, FEN sửa tay chưa hợp lệ..."
+                } else { tvStatus.text = "⏳ Lỗi API: $apiErr"; tvFenDebug.text = fullFen }
             }
         }
     }
@@ -1077,39 +1083,80 @@ class OverlayService : Service() {
     // API STOCKFISH
     // =========================================================================
 
-    private fun raceBothStockfishServers(fen: String): String? {
-        val tasks = listOf(
-            Callable { fetchFromChessApi(fen) ?: throw RuntimeException("No move") },
-            Callable { fetchFromStockfishOnline(fen) ?: throw RuntimeException("No move") }
-        )
-        return try { apiRacePool.invokeAny(tasks, 2200, TimeUnit.MILLISECONDS) } catch (_: Exception) { null }
+    private val apiErrors = ConcurrentHashMap<String, String>()
+
+    private fun noteApiError(name: String, msg: String) {
+        apiErrors[name] = msg
+        Log.w("ChessAPI", "$name: $msg")
     }
 
-    private fun fetchFromStockfishOnline(fen: String): String? {
+    // Tóm tắt lý do lỗi của từng nguồn để hiện lên panel (lichess 404 chỉ là chưa có trong cache nên bỏ qua)
+    private fun apiErrorSummary(): String {
+        val parts = apiErrors.entries.filter { !(it.key == "lichess" && it.value == "HTTP 404") }
+        return if (parts.isEmpty()) "không phản hồi (hết ${API_TOTAL_MS / 1000}s)" else parts.joinToString(" | ") { "${it.key}: ${it.value}" }
+    }
+
+    private fun raceBothStockfishServers(fen: String): String? {
+        apiErrors.clear()
+        val tasks = listOf(
+            Callable { fetchFromChessApi(fen) ?: throw RuntimeException("No move") },
+            Callable { fetchFromStockfishOnline(fen) ?: throw RuntimeException("No move") },
+            Callable { fetchFromLichessCloud(fen) ?: throw RuntimeException("No move") }
+        )
+        return try { apiRacePool.invokeAny(tasks, API_TOTAL_MS, TimeUnit.MILLISECONDS) } catch (_: Exception) { null }
+    }
+
+    // Gọi HTTP, ghi lại lý do nếu lỗi (mã HTTP / loại exception)
+    private fun httpRequest(name: String, urlStr: String, method: String, body: String?): String? {
         var conn: HttpURLConnection? = null
         return try {
-            val url = URL("https://stockfish.online/api/s/v2.php?fen=${URLEncoder.encode(fen, "UTF-8")}&depth=10")
-            conn = (url.openConnection() as HttpURLConnection).apply { requestMethod = "GET"; connectTimeout = 1900; readTimeout = 1900; setRequestProperty("User-Agent", "Mozilla/5.0") }
-            if (conn.responseCode == 200) {
-                val json = JSONObject(conn.inputStream.bufferedReader().use { it.readText() })
-                if (!json.optBoolean("success", true)) return null
-                val raw = json.optString("bestmove", "").ifEmpty { json.optString("data", "") }
-                val p = raw.trim().split(" "); val c = if (p.size >= 2) p[1] else p[0]
-                if (c.length >= 4 && c != "(none)") c.substring(0, min(c.length, 5)) else null
-            } else null
-        } catch (_: Exception) { null } finally { try { conn?.disconnect() } catch (_: Exception) {} }
+            conn = (URL(urlStr).openConnection() as HttpURLConnection).apply {
+                requestMethod = method; connectTimeout = API_TIMEOUT_MS; readTimeout = API_TIMEOUT_MS
+                setRequestProperty("User-Agent", "Mozilla/5.0 (Android)"); setRequestProperty("Accept", "application/json")
+                if (body != null) { setRequestProperty("Content-Type", "application/json"); doOutput = true }
+            }
+            if (body != null) conn.outputStream.use { it.write(body.toByteArray()) }
+            val code = conn.responseCode
+            if (code == 200) conn.inputStream.bufferedReader().use { it.readText() }
+            else { noteApiError(name, "HTTP $code"); null }
+        } catch (e: Exception) {
+            noteApiError(name, "${e.javaClass.simpleName}: ${e.message}".take(80)); null
+        } finally { try { conn?.disconnect() } catch (_: Exception) {} }
     }
 
     private fun fetchFromChessApi(fen: String): String? {
-        var conn: HttpURLConnection? = null
+        val body = JSONObject().put("fen", fen).put("depth", 12).put("maxThinkingTime", 100).toString()
+        val resp = httpRequest("chess-api", "https://chess-api.com/v1", "POST", body) ?: return null
         return try {
-            conn = (URL("https://chess-api.com/v1").openConnection() as HttpURLConnection).apply { requestMethod = "POST"; connectTimeout = 1900; readTimeout = 1900; setRequestProperty("Content-Type", "application/json"); doOutput = true }
-            conn.outputStream.use { it.write(JSONObject().put("fen", fen).put("depth", 10).toString().toByteArray()) }
-            if (conn.responseCode == 200) {
-                val move = JSONObject(conn.inputStream.bufferedReader().use { it.readText() }).optString("move", "")
-                if (move.length >= 4) move.substring(0, min(move.length, 5)) else null
-            } else null
-        } catch (_: Exception) { null } finally { try { conn?.disconnect() } catch (_: Exception) {} }
+            val move = JSONObject(resp).optString("move", "")
+            if (move.length >= 4) move.substring(0, min(move.length, 5))
+            else { noteApiError("chess-api", "không có nước: ${resp.take(60)}"); null }
+        } catch (_: Exception) { noteApiError("chess-api", "JSON lỗi: ${resp.take(60)}"); null }
+    }
+
+    private fun fetchFromStockfishOnline(fen: String): String? {
+        val url = "https://stockfish.online/api/s/v2.php?fen=${URLEncoder.encode(fen, "UTF-8")}&depth=12"
+        val resp = httpRequest("stockfish.online", url, "GET", null) ?: return null
+        return try {
+            val json = JSONObject(resp)
+            if (!json.optBoolean("success", true)) { noteApiError("stockfish.online", "success=false: ${json.optString("data", resp).take(50)}"); return null }
+            val raw = json.optString("bestmove", "").ifEmpty { json.optString("data", "") }
+            val p = raw.trim().split(" "); val c = if (p.size >= 2) p[1] else p[0]
+            if (c.length >= 4 && c != "(none)") c.substring(0, min(c.length, 5))
+            else { noteApiError("stockfish.online", "không có nước: ${resp.take(60)}"); null }
+        } catch (_: Exception) { noteApiError("stockfish.online", "JSON lỗi: ${resp.take(60)}"); null }
+    }
+
+    // Nguồn dự phòng: cloud-eval của Lichess (chỉ có cho thế cờ đã được cache, nên 404 là bình thường)
+    private fun fetchFromLichessCloud(fen: String): String? {
+        val url = "https://lichess.org/api/cloud-eval?fen=${URLEncoder.encode(fen, "UTF-8")}&multiPv=1"
+        val resp = httpRequest("lichess", url, "GET", null) ?: return null
+        return try {
+            val pvs = JSONObject(resp).optJSONArray("pvs")
+            val moves = pvs?.optJSONObject(0)?.optString("moves", "") ?: ""
+            val first = moves.trim().split(" ").firstOrNull() ?: ""
+            if (first.length >= 4) first.substring(0, min(first.length, 5)) else null
+        } catch (_: Exception) { noteApiError("lichess", "JSON lỗi"); null }
     }
 
     private fun formatMoveText(uci: String): String {
