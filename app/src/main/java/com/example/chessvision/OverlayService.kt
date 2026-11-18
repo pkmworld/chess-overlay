@@ -113,6 +113,45 @@ class OverlayService : Service() {
 
     private val moveCache = ConcurrentHashMap<String, String>()
 
+    // ===== SÁCH KHAI CUỘC BẪY =====
+    @Volatile private var trapMode = true
+    // khóa = "<FEN bàn cờ> w|b"; giá trị = các nước bẫy khả dĩ ở thế đó (chọn ngẫu nhiên cho đa dạng)
+    private val trapBookWhite = HashMap<String, MutableList<String>>()
+    private val trapBookBlack = HashMap<String, MutableList<String>>()
+
+    // Các tuyến Trắng (nước chẵn 0,2,4.. là của mình; đối thủ đi sai tuyến thì tự quay về Stockfish)
+    private val trapLinesWhite = listOf(
+        // Fried Liver Attack
+        "e2e4 e7e5 g1f3 b8c6 f1c4 g8f6 f3g5 d7d5 e4d5 f6d5 g5f7 e8f7 d1f3 f7e6 b1c3",
+        // Bẫy Légal (chiếu hết bằng Mã d5)
+        "e2e4 e7e5 g1f3 d7d6 f1c4 c8g4 b1c3 g7g6 f3e5 g4d1 c4f7 e8e7 c3d5",
+        // Smith-Morra Gambit vs Sicilian
+        "e2e4 c7c5 d2d4 c5d4 c2c3 d4c3 b1c3 b8c6 g1f3 d7d6 f1c4 e7e6 e1g1",
+        // Danish Gambit (hy sinh 2 Tốt lấy 2 Tượng tấn công)
+        "e2e4 e7e5 d2d4 e5d4 c2c3 d4c3 f1c4 c3b2 c1b2"
+    )
+    // Các tuyến Đen (nước lẻ 1,3,5.. là của mình)
+    private val trapLinesBlack = listOf(
+        // Blackburne Shilling Gambit (bẫy Mã f3 chiếu hết)
+        "e2e4 e7e5 g1f3 b8c6 f1c4 c6d4 f3e5 d8g5 e5f7 g5g2 h1f1 g2e4 c4e2 d4f3",
+        // Englund Gambit vs 1.d4
+        "d2d4 e7e5 d4e5 b8c6 g1f3 d8e7 c1f4 e7b4 f4d2 b4b2",
+        // Englund: nếu Trắng đáp 6.Bc3? thì 6...Bb4 7.Qd2 Bxc3 8.Qxc3 Qc1#
+        "d2d4 e7e5 d4e5 b8c6 g1f3 d8e7 c1f4 e7b4 f4d2 b4b2 d2c3 f8b4 d1d2 b4c3 d2c3 b2c1",
+        // Englund: 6.Bc3? Bb4 7.Bxb4 Nxb4 (Đen thắng quân)
+        "d2d4 e7e5 d4e5 b8c6 g1f3 d8e7 c1f4 e7b4 f4d2 b4b2 d2c3 f8b4 c3b4 c6b4",
+        // Englund: 5.Qd2? Qxb2 6.Qc3? Bb4
+        "d2d4 e7e5 d4e5 b8c6 g1f3 d8e7 c1f4 e7b4 d1d2 b4b2 d2c3 f8b4",
+        // Elephant Trap (QGD): 6.Nxd5?? Nxd5! 7.Bxd8 Bb4+ 8.Qd2 Bxd2+ 9.Kxd2 Kxd8
+        "d2d4 d7d5 c2c4 e7e6 b1c3 g8f6 c1g5 b8d7 c4d5 e6d5 c3d5 f6d5 g5d8 f8b4 d1d2 b4d2 e1d2 e8d8",
+        // Lasker Trap (Albin): 4.e3? Bb4+ 5.Bd2 dxe3! 6.Bxb4?? exf2+ 7.Ke2 fxg1=N+
+        "d2d4 d7d5 c2c4 e7e5 d4e5 d5d4 e2e3 f8b4 c1d2 d4e3 d2b4 e3f2 e1e2 f2g1n",
+        // Fishing Pole (Ruy Lopez/Berlin): 5.h3 h5! 6.hxg4?? hxg4 7.Ne1 Qh4 ...Qh2#
+        "e2e4 e7e5 g1f3 b8c6 f1b5 g8f6 e1g1 f6g4 h2h3 h7h5 h3g4 h5g4 f3e1 d8h4 f2f4 g4g3 b1c3 h4h7 c3a4 h7h2",
+        // Noah's Ark Trap (Ruy Lopez): 5.d4? b5 ... 11.Qd5 c4 nhốt Tượng
+        "e2e4 e7e5 g1f3 b8c6 f1b5 a7a6 b5a4 d7d6 d2d4 b7b5 a4b3 c6d4 f3d4 e5d4 d1d4 c7c5 d4d5 c8e6 d5c6 e6d7 c6d5 c5c4"
+    )
+
     // Mẫu hình bóng 12x12 đã chuẩn hóa ZNCC, gộp Trắng/Đen cùng loại (khóa = chữ HOA)
     private val shapeTemplates = ConcurrentHashMap<Char, List<FloatArray>>()
     @Volatile private var lumWhite = -1
@@ -150,6 +189,7 @@ class OverlayService : Service() {
         setupUI()
 
         loadTemplatesFromDisk()
+        buildTrapBook()
     }
 
     private fun updateScreenMetrics() {
@@ -311,8 +351,16 @@ class OverlayService : Service() {
         val btnClose = createButton("✕ Đóng", "#c0392b") { stopSelf() }
         row2.addView(btnEdit); row2.addView(btnScan); row2.addView(btnAuto); row2.addView(btnClose)
 
+        val row3 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT) }
+        val btnTrap = createButton("🪤 Bẫy khai cuộc: Bật", "#16a085") { btn ->
+            trapMode = !trapMode
+            btn.text = if (trapMode) "🪤 Bẫy khai cuộc: Bật" else "🪤 Bẫy khai cuộc: Tắt"
+            resetState()
+        }
+        row3.addView(btnTrap)
+
         mainControlPanel.addView(tvStatus); mainControlPanel.addView(tvFenDebug)
-        mainControlPanel.addView(row1); mainControlPanel.addView(row2)
+        mainControlPanel.addView(row1); mainControlPanel.addView(row2); mainControlPanel.addView(row3)
 
         // PANEL CHỈNH KHUNG
         calibControlPanel = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; background = GradientDrawable().apply { cornerRadius = 32f; setColor(Color.argb(250, 40, 20, 60)) }; setPadding(24, 20, 24, 20); visibility = View.GONE }
@@ -802,6 +850,16 @@ class OverlayService : Service() {
 
             if (stateKey == lastCompletedStateKey && chessOverlayView.hasActiveArrow()) return
 
+            // Khai cuộc bẫy: ưu tiên nước trong sách bẫy nếu thế cờ khớp
+            if (trapMode) {
+                val trapMove = (if (activeTurn == 'w') trapBookWhite else trapBookBlack)["$boardFen $activeTurn"]?.random()
+                if (trapMove != null) {
+                    lastCompletedStateKey = stateKey
+                    mainHandler.post { chessOverlayView.setMove(trapMove); tvStatus.text = "🪤 Bẫy: ${formatMoveText(trapMove)}" }
+                    return
+                }
+            }
+
             val fullFen = "$boardFen $activeTurn $castling $ep 0 1"
             val cachedMove = moveCache[fullFen]
             if (cachedMove != null) {
@@ -837,6 +895,50 @@ class OverlayService : Service() {
     }
 
     private fun copyMatrix(m: Array<CharArray>): Array<CharArray> = Array(8) { r -> m[r].clone() }
+
+    // ----- Sách khai cuộc bẫy -----
+    private fun fenToMatrix(board: String): Array<CharArray> {
+        val m = Array(8) { CharArray(8) { '1' } }
+        board.split("/").forEachIndexed { r, row ->
+            var c = 0
+            for (ch in row) { if (ch.isDigit()) c += ch - '0' else { m[r][c] = ch; c++ } }
+        }
+        return m
+    }
+
+    // Áp nước UCI lên ma trận (hàng 0 = hàng 8); xử lý nhập thành và en passant
+    private fun applyUci(m: Array<CharArray>, uci: String) {
+        val fc = uci[0] - 'a'; val fr = 8 - (uci[1] - '0')
+        val tc = uci[2] - 'a'; val tr = 8 - (uci[3] - '0')
+        val p = m[fr][fc]
+        if (p.uppercaseChar() == 'K' && abs(tc - fc) == 2) {
+            if (tc > fc) { m[fr][5] = m[fr][7]; m[fr][7] = '1' } else { m[fr][3] = m[fr][0]; m[fr][0] = '1' }
+        }
+        if (p.uppercaseChar() == 'P' && fc != tc && m[tr][tc] == '1') m[fr][tc] = '1'
+        // Phong cấp (ví dụ f2g1n): đặt quân phong cùng màu với Tốt
+        val placed = if (uci.length >= 5) { val q = uci[4]; if (p.isUpperCase()) q.uppercaseChar() else q.lowercaseChar() } else p
+        m[tr][tc] = placed; m[fr][fc] = '1'
+    }
+
+    private fun buildTrapBook() {
+        trapBookWhite.clear(); trapBookBlack.clear()
+        fun feed(lines: List<String>, mineIsWhite: Boolean) {
+            for (line in lines) {
+                val m = fenToMatrix(START_BOARD)
+                line.trim().split(" ").forEachIndexed { i, mv ->
+                    val whiteToMove = i % 2 == 0
+                    if (whiteToMove == mineIsWhite) {
+                        val key = buildFenBoardString(m) + (if (whiteToMove) " w" else " b")
+                        val list = (if (mineIsWhite) trapBookWhite else trapBookBlack).getOrPut(key) { ArrayList() }
+                        if (!list.contains(mv)) list.add(mv)
+                    }
+                    applyUci(m, mv)
+                }
+            }
+        }
+        feed(trapLinesWhite, true)
+        feed(trapLinesBlack, false)
+    }
 
     private fun areMatricesEqual(m1: Array<CharArray>, m2: Array<CharArray>): Boolean {
         for (r in 0..7) for (c in 0..7) if (m1[r][c] != m2[r][c]) return false
