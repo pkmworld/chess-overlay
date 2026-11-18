@@ -42,6 +42,9 @@ class OverlayService : Service() {
         private const val OCCUPIED_MIN_PX = 70   // số pixel "khác nền" tối thiểu để coi ô có quân
         private const val MATCH_MIN = 0.60f      // điểm ZNCC tối thiểu
         private const val MATCH_MARGIN = 0.015f  // chênh lệch tối thiểu giữa loại quân tốt nhất và nhì
+        private const val MATCH_MIN_RELAXED = 0.45f     // ngưỡng nới (dùng sau vài lần quét thất bại: highlight/hiệu ứng làm mờ hình quân)
+        private const val MATCH_MARGIN_RELAXED = 0.005f
+        private const val RELAX_AFTER = 3               // số lần quét lại thất bại trước khi nới ngưỡng
         private const val MAX_RETRIES = 8        // số lần quét lại tối đa khi chưa ổn định (~800ms)
         private const val NUDGE_COUNT = 8
         private const val START_BOARD = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR"
@@ -60,6 +63,12 @@ class OverlayService : Service() {
     private lateinit var editorGridContainer: LinearLayout
     private lateinit var controlParams: WindowManager.LayoutParams
     private var rootContainer: LinearLayout? = null
+
+    // Thu nhỏ panel thành bong bóng
+    private var isCollapsed = false
+    private var bubbleView: TextView? = null
+    private var panelX = 0; private var panelY = 80          // vị trí panel (gốc: giữa trên)
+    private var bubbleX = 0; private var bubbleY = 300       // vị trí bong bóng (gốc: cạnh trái)
 
     private lateinit var tvStatus: TextView
     private lateinit var tvFenDebug: TextView
@@ -128,7 +137,17 @@ class OverlayService : Service() {
         // Smith-Morra Gambit vs Sicilian
         "e2e4 c7c5 d2d4 c5d4 c2c3 d4c3 b1c3 b8c6 g1f3 d7d6 f1c4 e7e6 e1g1",
         // Danish Gambit (hy sinh 2 Tốt lấy 2 Tượng tấn công)
-        "e2e4 e7e5 d2d4 e5d4 c2c3 d4c3 f1c4 c3b2 c1b2"
+        "e2e4 e7e5 d2d4 e5d4 c2c3 d4c3 f1c4 c3b2 c1b2",
+        // King's Gambit - Kieseritzky: 2.f4 exf4 3.Nf3 g5 4.h4 g4 5.Ne5
+        "e2e4 e7e5 f2f4 e5f4 g1f3 g7g5 h2h4 g5g4 f3e5",
+        // Evans Gambit, Compromised Defence: 4.b4 Bxb4 5.c3 Ba5 6.d4 exd4 7.O-O dxc3 8.Qb3 Qf6 9.e5 Qg6 10.Nxc3 Nge7 11.Ba3
+        "e2e4 e7e5 g1f3 b8c6 f1c4 f8c5 b2b4 c5b4 c2c3 b4a5 d2d4 e5d4 e1g1 d4c3 d1b3 d8f6 e4e5 f6g6 b1c3 g8e7 c1a3",
+        // Blackmar-Diemer Gambit (chính)
+        "d2d4 d7d5 e2e4 d5e4 b1c3 g8f6 f2f3 e4f3 g1f3",
+        // Ryder Gambit (BDG): 5.Qxf3 Qxd4 6.Be3 Qb4 7.O-O-O (Đen dễ sa bẫy Bg4? 8.Nb5!)
+        "d2d4 d7d5 e2e4 d5e4 b1c3 g8f6 f2f3 e4f3 d1f3 d8d4 c1e3 d4b4 e1c1",
+        // Vienna Gambit - Würzburger Trap: Đen tham ăn Mã g3 rồi mất Tượng
+        "e2e4 e7e5 b1c3 g8f6 f2f4 d7d5 f4e5 f6e4 d2d3 d8h4 g2g3 e4g3 g1f3 h4h5 c3d5 c8g4 d5f4 g4f3 f4h5 f3d1 h2g3 d1c2 b2b3"
     )
     // Các tuyến Đen (nước lẻ 1,3,5.. là của mình)
     private val trapLinesBlack = listOf(
@@ -149,7 +168,13 @@ class OverlayService : Service() {
         // Fishing Pole (Ruy Lopez/Berlin): 5.h3 h5! 6.hxg4?? hxg4 7.Ne1 Qh4 ...Qh2#
         "e2e4 e7e5 g1f3 b8c6 f1b5 g8f6 e1g1 f6g4 h2h3 h7h5 h3g4 h5g4 f3e1 d8h4 f2f4 g4g3 b1c3 h4h7 c3a4 h7h2",
         // Noah's Ark Trap (Ruy Lopez): 5.d4? b5 ... 11.Qd5 c4 nhốt Tượng
-        "e2e4 e7e5 g1f3 b8c6 f1b5 a7a6 b5a4 d7d6 d2d4 b7b5 a4b3 c6d4 f3d4 e5d4 d1d4 c7c5 d4d5 c8e6 d5c6 e6d7 c6d5 c5c4"
+        "e2e4 e7e5 g1f3 b8c6 f1b5 a7a6 b5a4 d7d6 d2d4 b7b5 a4b3 c6d4 f3d4 e5d4 d1d4 c7c5 d4d5 c8e6 d5c6 e6d7 c6d5 c5c4",
+        // Budapest Gambit - Kieninger Trap: ...Nd3# (mã chiếu hết)
+        "d2d4 g8f6 c2c4 e7e5 d4e5 f6g4 c1f4 b8c6 g1f3 f8b4 b1d2 d8e7 a2a3 g4e5 a3b4 e5d3",
+        // Budapest Gambit - Fajarowicz: 3.dxe5 Ne4 ... ...Nd3#
+        "d2d4 g8f6 c2c4 e7e5 d4e5 f6e4 d1c2 f8b4 b1d2 d7d5 e5d6 c8f5 c2a4 b8c6 a2a3 e4c5 d6c7 d8e7 a4d1 c5d3",
+        // Latvian Gambit: 2...f5 3.Nxe5 Qf6 4.d4 d6 5.Nc4 fxe4 6.Nc3 Qg6
+        "e2e4 e7e5 g1f3 f7f5 f3e5 d8f6 d2d4 d7d6 e5c4 f5e4 b1c3 f6g6"
     )
 
     // Mẫu hình bóng 12x12 đã chuẩn hóa ZNCC, gộp Trắng/Đen cùng loại (khóa = chữ HOA)
@@ -298,6 +323,8 @@ class OverlayService : Service() {
     private fun createButton(label: String, colorStr: String, onClick: (Button) -> Unit): Button {
         return Button(this).apply {
             text = label; textSize = 10f; setTextColor(Color.WHITE); background = getBtnBg(colorStr); isAllCaps = false; setPadding(4, 16, 4, 16)
+            // Nút Android mặc định rộng tối thiểu 88dp -> 4 nút/hàng tràn khỏi màn hình; bỏ giới hạn này
+            minWidth = 0; minimumWidth = 0; minHeight = 0; minimumHeight = 0
             layoutParams = LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT).apply { setMargins(4, 4, 4, 4); weight = 1f }
             setOnClickListener { onClick(this) }
         }
@@ -311,7 +338,7 @@ class OverlayService : Service() {
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         }
 
-        tvStatus = TextView(this).apply { text = "Chess Pro v10.2 • Sẵn sàng"; setTextColor(Color.parseColor("#00E676")); textSize = 11.5f; gravity = Gravity.CENTER; setPadding(0, 0, 0, 8) }
+        tvStatus = TextView(this).apply { text = "Chess Pro v10.3 • Sẵn sàng"; setTextColor(Color.parseColor("#00E676")); textSize = 11.5f; gravity = Gravity.CENTER; setPadding(0, 0, 0, 8) }
         tvFenDebug = TextView(this).apply { text = "Chưa quét bàn cờ"; setTextColor(Color.parseColor("#f1c40f")); textSize = 9.5f; gravity = Gravity.CENTER; maxLines = 1; setPadding(0, 0, 0, 12) }
 
         val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT) }
@@ -352,14 +379,26 @@ class OverlayService : Service() {
         row2.addView(btnEdit); row2.addView(btnScan); row2.addView(btnAuto); row2.addView(btnClose)
 
         val row3 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT) }
-        val btnTrap = createButton("🪤 Bẫy khai cuộc: Bật", "#16a085") { btn ->
+        val btnTrap = createButton("🪤 Bẫy: Bật", "#16a085") { btn ->
             trapMode = !trapMode
-            btn.text = if (trapMode) "🪤 Bẫy khai cuộc: Bật" else "🪤 Bẫy khai cuộc: Tắt"
+            btn.text = if (trapMode) "🪤 Bẫy: Bật" else "🪤 Bẫy: Tắt"
             resetState()
         }
         row3.addView(btnTrap)
 
-        mainControlPanel.addView(tvStatus); mainControlPanel.addView(tvFenDebug)
+        // Nút THU NHỎ nằm ngay dòng đầu của panel (góc phải) để luôn nhìn thấy
+        val dens = resources.displayMetrics.density
+        val btnMinTop = Button(this).apply {
+            text = "➖"; textSize = 16f; setTextColor(Color.WHITE); background = getBtnBg("#7f8c8d"); isAllCaps = false
+            minWidth = 0; minimumWidth = 0; minHeight = 0; minimumHeight = 0; setPadding(0, 0, 0, 0)
+            layoutParams = LinearLayout.LayoutParams((44 * dens).toInt(), (34 * dens).toInt()).apply { setMargins(4, 0, 0, 8) }
+            setOnClickListener { setCollapsed(true) }
+        }
+        val header = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; gravity = Gravity.CENTER_VERTICAL }
+        header.addView(tvStatus, LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1f))
+        header.addView(btnMinTop)
+
+        mainControlPanel.addView(header); mainControlPanel.addView(tvFenDebug)
         mainControlPanel.addView(row1); mainControlPanel.addView(row2); mainControlPanel.addView(row3)
 
         // PANEL CHỈNH KHUNG
@@ -392,7 +431,45 @@ class OverlayService : Service() {
         })
         manualEditorPanel.addView(tvEditTitle); manualEditorPanel.addView(editorGridContainer); manualEditorPanel.addView(eRowActions)
 
-        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(mainControlPanel); addView(calibControlPanel); addView(manualEditorPanel) }
+        // BONG BÓNG (khi thu nhỏ): chạm để mở lại, kéo để di chuyển, thả ra sẽ hít vào cạnh gần nhất
+        val bubbleSize = (52 * resources.displayMetrics.density).toInt()
+        val bubble = TextView(this).apply {
+            text = "♞"; textSize = 24f; setTextColor(Color.WHITE); gravity = Gravity.CENTER
+            background = GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.argb(235, 39, 174, 96)); setStroke(3, Color.WHITE) }
+            layoutParams = LinearLayout.LayoutParams(bubbleSize, bubbleSize)
+            visibility = View.GONE
+        }
+        bubbleView = bubble
+        val slop = ViewConfiguration.get(this).scaledTouchSlop
+        var bx = 0; var by = 0; var btx = 0f; var bty = 0f; var dragged = false
+        bubble.setOnTouchListener { _, e ->
+            when (e.action) {
+                MotionEvent.ACTION_DOWN -> { bx = controlParams.x; by = controlParams.y; btx = e.rawX; bty = e.rawY; dragged = false; true }
+                MotionEvent.ACTION_MOVE -> {
+                    val dx = e.rawX - btx; val dy = e.rawY - bty
+                    if (!dragged && (abs(dx) > slop || abs(dy) > slop)) dragged = true
+                    if (dragged) {
+                        controlParams.x = bx + dx.toInt(); controlParams.y = by + dy.toInt()
+                        try { windowManager.updateViewLayout(rootContainer, controlParams) } catch (_: Exception) {}
+                    }
+                    true
+                }
+                MotionEvent.ACTION_UP -> {
+                    if (!dragged) {
+                        setCollapsed(false)
+                    } else {
+                        controlParams.x = if (controlParams.x + bubbleSize / 2 < screenWidth / 2) 0 else screenWidth - bubbleSize
+                        controlParams.y = controlParams.y.coerceIn(0, max(0, screenHeight - bubbleSize))
+                        bubbleX = controlParams.x; bubbleY = controlParams.y
+                        try { windowManager.updateViewLayout(rootContainer, controlParams) } catch (_: Exception) {}
+                    }
+                    true
+                }
+                else -> false
+            }
+        }
+
+        val root = LinearLayout(this).apply { orientation = LinearLayout.VERTICAL; addView(mainControlPanel); addView(calibControlPanel); addView(manualEditorPanel); addView(bubble) }
         rootContainer = root
         controlParams = WindowManager.LayoutParams(WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.WRAP_CONTENT, WindowManager.LayoutParams.TYPE_APPLICATION_OVERLAY, WindowManager.LayoutParams.FLAG_NOT_FOCUSABLE, PixelFormat.TRANSLUCENT).apply { gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL; y = 80 }
         var ix = 0; var iy = 0; var tx = 0f; var ty = 0f
@@ -404,6 +481,28 @@ class OverlayService : Service() {
             }
         }
         windowManager.addView(root, controlParams)
+    }
+
+    // Thu nhỏ panel thành bong bóng / mở lại. Mũi tên nước đi và chế độ Auto vẫn chạy bình thường khi thu nhỏ.
+    private fun setCollapsed(collapsed: Boolean) {
+        val root = rootContainer ?: return
+        val bubble = bubbleView ?: return
+        if (collapsed == isCollapsed) return
+        isCollapsed = collapsed
+        if (collapsed) {
+            panelX = controlParams.x; panelY = controlParams.y
+            mainControlPanel.visibility = View.GONE
+            bubble.visibility = View.VISIBLE
+            controlParams.gravity = Gravity.TOP or Gravity.START
+            controlParams.x = bubbleX; controlParams.y = bubbleY
+        } else {
+            bubbleX = controlParams.x; bubbleY = controlParams.y
+            bubble.visibility = View.GONE
+            mainControlPanel.visibility = View.VISIBLE
+            controlParams.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+            controlParams.x = panelX; controlParams.y = panelY
+        }
+        try { windowManager.updateViewLayout(root, controlParams) } catch (_: Exception) {}
     }
 
     private fun buildEditorGridUI() {
@@ -774,17 +873,27 @@ class OverlayService : Service() {
 
             val rawMatrix = Array(8) { CharArray(8) { '1' } }
             var unknown = 0
+            val unknownSq = ArrayList<String>()
+            val relaxed = debounceRetries >= RELAX_AFTER   // vài lần đầu dùng ngưỡng chặt, sau đó nới dần
             for (vr in 0..7) {
                 for (vc in 0..7) {
                     val p = profiles[vr][vc]
                     if (!p.isOccupied) continue
-                    val type = classifyPieceType(vr, p)
-                    if (type == null) { unknown++; continue }
+                    val type = classifyPieceType(vr, p, relaxed)
+                    if (type == null) {
+                        unknown++
+                        if (unknownSq.size < 4) {
+                            val wb = chessOverlayView.isWhiteBottom
+                            val file = if (wb) vc else 7 - vc; val rank = if (wb) 8 - vr else vr + 1
+                            unknownSq.add("${'a' + file}$rank")
+                        }
+                        continue
+                    }
                     rawMatrix[vr][vc] = if (p.avgPieceLum >= threshold) type.uppercaseChar() else type.lowercaseChar()
                 }
             }
             if (unknown > 0) {
-                mainHandler.post { tvStatus.text = "Chờ nét ($unknown ô chưa nhận ra)..." }
+                mainHandler.post { tvStatus.text = "Chờ nét ($unknown ô chưa nhận ra: ${unknownSq.joinToString(" ")}${if (unknown > 4) " ..." else ""})" }
                 scheduleRetry(); return
             }
 
@@ -963,7 +1072,7 @@ class OverlayService : Service() {
     }
 
     // Trả về loại quân (chữ HOA) hoặc null nếu không đủ tin cậy
-    private fun classifyPieceType(r: Int, profile: CellProfile): Char? {
+    private fun classifyPieceType(r: Int, profile: CellProfile, relaxed: Boolean = false): Char? {
         if (templatesReady()) {
             var best = '?'; var bestS = -2f; var second = -2f
             for ((type, list) in shapeTemplates) {
@@ -975,7 +1084,9 @@ class OverlayService : Service() {
                 }
                 if (s > bestS) { second = bestS; bestS = s; best = type } else if (s > second) second = s
             }
-            return if (bestS >= MATCH_MIN && bestS - second >= MATCH_MARGIN) best else null
+            val minScore = if (relaxed) MATCH_MIN_RELAXED else MATCH_MIN
+            val minMargin = if (relaxed) MATCH_MARGIN_RELAXED else MATCH_MARGIN
+            return if (bestS >= minScore && bestS - second >= minMargin) best else null
         }
         return classifyByGeometry(r, profile)   // tạm thời cho tới khi người dùng Học Mẫu
     }
@@ -1269,7 +1380,7 @@ class OverlayService : Service() {
     private fun startForegroundNotification() {
         val channel = NotificationChannel("chess_overlay_channel", "Chess Overlay", NotificationManager.IMPORTANCE_LOW)
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-        val notif = Notification.Builder(this, "chess_overlay_channel").setContentTitle("Chess Pro v10.2").setSmallIcon(android.R.drawable.ic_menu_compass).build()
+        val notif = Notification.Builder(this, "chess_overlay_channel").setContentTitle("Chess Pro v10.3").setSmallIcon(android.R.drawable.ic_menu_compass).build()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION) else startForeground(1, notif)
     }
 
