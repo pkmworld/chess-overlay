@@ -110,6 +110,8 @@ class OverlayService : Service() {
     @Volatile private var previousValidMatrix: Array<CharArray>? = null
     @Volatile private var lastEnPassant: String = "-"
     @Volatile private var castleRights: Set<Char> = setOf('K', 'Q', 'k', 'q')
+    @Volatile private var autoSide = true          // tự nhận hướng bàn cờ (Trắng/Đen ở dưới)
+    @Volatile private var sideDetected = false     // đã nhận hướng cho ván hiện tại chưa
 
     // Khử rung
     @Volatile private var pendingStableMatrix: Array<CharArray>? = null
@@ -127,54 +129,66 @@ class OverlayService : Service() {
     // khóa = "<FEN bàn cờ> w|b"; giá trị = các nước bẫy khả dĩ ở thế đó (chọn ngẫu nhiên cho đa dạng)
     private val trapBookWhite = HashMap<String, MutableList<String>>()
     private val trapBookBlack = HashMap<String, MutableList<String>>()
+    // khóa = "<FEN> w|b <nước>" -> tên các bẫy dùng nước đó; trapFinalKeys = nước đó là nước CUỐI của tuyến
+    private val trapNames = HashMap<String, MutableSet<String>>()
+    private val trapFinalKeys = HashSet<String>()
+    @Volatile private var activeTrapName: String? = null   // bẫy đang chạy (null = không)
+    @Volatile private var activeTrapFinal = false
+    @Volatile private var trapExitNote = ""                // ghi chú hiển thị sau khi rời bẫy
 
     // Các tuyến Trắng (nước chẵn 0,2,4.. là của mình; đối thủ đi sai tuyến thì tự quay về Stockfish)
     private val trapLinesWhite = listOf(
         // Fried Liver Attack
-        "e2e4 e7e5 g1f3 b8c6 f1c4 g8f6 f3g5 d7d5 e4d5 f6d5 g5f7 e8f7 d1f3 f7e6 b1c3",
+        "Fried Liver|e2e4 e7e5 g1f3 b8c6 f1c4 g8f6 f3g5 d7d5 e4d5 f6d5 g5f7 e8f7 d1f3 f7e6 b1c3",
         // Bẫy Légal (chiếu hết bằng Mã d5)
-        "e2e4 e7e5 g1f3 d7d6 f1c4 c8g4 b1c3 g7g6 f3e5 g4d1 c4f7 e8e7 c3d5",
+        "Bẫy Légal|e2e4 e7e5 g1f3 d7d6 f1c4 c8g4 b1c3 g7g6 f3e5 g4d1 c4f7 e8e7 c3d5",
         // Smith-Morra Gambit vs Sicilian
-        "e2e4 c7c5 d2d4 c5d4 c2c3 d4c3 b1c3 b8c6 g1f3 d7d6 f1c4 e7e6 e1g1",
+        "Smith-Morra|e2e4 c7c5 d2d4 c5d4 c2c3 d4c3 b1c3 b8c6 g1f3 d7d6 f1c4 e7e6 e1g1",
         // Danish Gambit (hy sinh 2 Tốt lấy 2 Tượng tấn công)
-        "e2e4 e7e5 d2d4 e5d4 c2c3 d4c3 f1c4 c3b2 c1b2",
+        "Danish Gambit|e2e4 e7e5 d2d4 e5d4 c2c3 d4c3 f1c4 c3b2 c1b2",
         // King's Gambit - Kieseritzky: 2.f4 exf4 3.Nf3 g5 4.h4 g4 5.Ne5
-        "e2e4 e7e5 f2f4 e5f4 g1f3 g7g5 h2h4 g5g4 f3e5",
+        "King's Gambit (Kieseritzky)|e2e4 e7e5 f2f4 e5f4 g1f3 g7g5 h2h4 g5g4 f3e5",
         // Evans Gambit, Compromised Defence: 4.b4 Bxb4 5.c3 Ba5 6.d4 exd4 7.O-O dxc3 8.Qb3 Qf6 9.e5 Qg6 10.Nxc3 Nge7 11.Ba3
-        "e2e4 e7e5 g1f3 b8c6 f1c4 f8c5 b2b4 c5b4 c2c3 b4a5 d2d4 e5d4 e1g1 d4c3 d1b3 d8f6 e4e5 f6g6 b1c3 g8e7 c1a3",
+        "Evans Gambit|e2e4 e7e5 g1f3 b8c6 f1c4 f8c5 b2b4 c5b4 c2c3 b4a5 d2d4 e5d4 e1g1 d4c3 d1b3 d8f6 e4e5 f6g6 b1c3 g8e7 c1a3",
         // Blackmar-Diemer Gambit (chính)
-        "d2d4 d7d5 e2e4 d5e4 b1c3 g8f6 f2f3 e4f3 g1f3",
+        "Blackmar-Diemer|d2d4 d7d5 e2e4 d5e4 b1c3 g8f6 f2f3 e4f3 g1f3",
         // Ryder Gambit (BDG): 5.Qxf3 Qxd4 6.Be3 Qb4 7.O-O-O (Đen dễ sa bẫy Bg4? 8.Nb5!)
-        "d2d4 d7d5 e2e4 d5e4 b1c3 g8f6 f2f3 e4f3 d1f3 d8d4 c1e3 d4b4 e1c1",
+        "Ryder Gambit|d2d4 d7d5 e2e4 d5e4 b1c3 g8f6 f2f3 e4f3 d1f3 d8d4 c1e3 d4b4 e1c1",
         // Vienna Gambit - Würzburger Trap: Đen tham ăn Mã g3 rồi mất Tượng
-        "e2e4 e7e5 b1c3 g8f6 f2f4 d7d5 f4e5 f6e4 d2d3 d8h4 g2g3 e4g3 g1f3 h4h5 c3d5 c8g4 d5f4 g4f3 f4h5 f3d1 h2g3 d1c2 b2b3"
+        "Vienna (Würzburger)|e2e4 e7e5 b1c3 g8f6 f2f4 d7d5 f4e5 f6e4 d2d3 d8h4 g2g3 e4g3 g1f3 h4h5 c3d5 c8g4 d5f4 g4f3 f4h5 f3d1 h2g3 d1c2 b2b3",
+        // Ponziani 3...Nf6 4.d4 Nxe4 5.d5 Ne7 6.Nxe5: nếu 6...d6?? 7.Bb5+ thắng quân
+        "Ponziani (3...Nf6)|e2e4 e7e5 g1f3 b8c6 c2c3 g8f6 d2d4 f6e4 d4d5 c6e7 f3e5 d7d6 f1b5",
+        // Ponziani 3...d5 4.Qa4 (Chigorin-Gossip 1889): kết thúc 15.Nd6# nếu Đen sai liên tiếp
+        "Ponziani (3...d5)|e2e4 e7e5 g1f3 b8c6 c2c3 d7d5 d1a4 f7f6 f1b5 g8e7 e4d5 d8d5 e1g1 c8d7 d2d4 e5e4 f3d2 e7g6 b5c4 d5a5 a4b3 f6f5 c4f7 e8e7 d2c4 a5a6 c1g5 e7f7 c4d6"
     )
     // Các tuyến Đen (nước lẻ 1,3,5.. là của mình)
     private val trapLinesBlack = listOf(
         // Blackburne Shilling Gambit (bẫy Mã f3 chiếu hết)
-        "e2e4 e7e5 g1f3 b8c6 f1c4 c6d4 f3e5 d8g5 e5f7 g5g2 h1f1 g2e4 c4e2 d4f3",
+        "Blackburne Shilling|e2e4 e7e5 g1f3 b8c6 f1c4 c6d4 f3e5 d8g5 e5f7 g5g2 h1f1 g2e4 c4e2 d4f3",
         // Englund Gambit vs 1.d4
-        "d2d4 e7e5 d4e5 b8c6 g1f3 d8e7 c1f4 e7b4 f4d2 b4b2",
+        "Englund Gambit|d2d4 e7e5 d4e5 b8c6 g1f3 d8e7 c1f4 e7b4 f4d2 b4b2",
         // Englund: nếu Trắng đáp 6.Bc3? thì 6...Bb4 7.Qd2 Bxc3 8.Qxc3 Qc1#
-        "d2d4 e7e5 d4e5 b8c6 g1f3 d8e7 c1f4 e7b4 f4d2 b4b2 d2c3 f8b4 d1d2 b4c3 d2c3 b2c1",
+        "Englund (6.Bc3?)|d2d4 e7e5 d4e5 b8c6 g1f3 d8e7 c1f4 e7b4 f4d2 b4b2 d2c3 f8b4 d1d2 b4c3 d2c3 b2c1",
         // Englund: 6.Bc3? Bb4 7.Bxb4 Nxb4 (Đen thắng quân)
-        "d2d4 e7e5 d4e5 b8c6 g1f3 d8e7 c1f4 e7b4 f4d2 b4b2 d2c3 f8b4 c3b4 c6b4",
+        "Englund (6.Bc3 Bb4)|d2d4 e7e5 d4e5 b8c6 g1f3 d8e7 c1f4 e7b4 f4d2 b4b2 d2c3 f8b4 c3b4 c6b4",
         // Englund: 5.Qd2? Qxb2 6.Qc3? Bb4
-        "d2d4 e7e5 d4e5 b8c6 g1f3 d8e7 c1f4 e7b4 d1d2 b4b2 d2c3 f8b4",
+        "Englund (5.Qd2?)|d2d4 e7e5 d4e5 b8c6 g1f3 d8e7 c1f4 e7b4 d1d2 b4b2 d2c3 f8b4",
         // Elephant Trap (QGD): 6.Nxd5?? Nxd5! 7.Bxd8 Bb4+ 8.Qd2 Bxd2+ 9.Kxd2 Kxd8
-        "d2d4 d7d5 c2c4 e7e6 b1c3 g8f6 c1g5 b8d7 c4d5 e6d5 c3d5 f6d5 g5d8 f8b4 d1d2 b4d2 e1d2 e8d8",
+        "Elephant Trap|d2d4 d7d5 c2c4 e7e6 b1c3 g8f6 c1g5 b8d7 c4d5 e6d5 c3d5 f6d5 g5d8 f8b4 d1d2 b4d2 e1d2 e8d8",
         // Lasker Trap (Albin): 4.e3? Bb4+ 5.Bd2 dxe3! 6.Bxb4?? exf2+ 7.Ke2 fxg1=N+
-        "d2d4 d7d5 c2c4 e7e5 d4e5 d5d4 e2e3 f8b4 c1d2 d4e3 d2b4 e3f2 e1e2 f2g1n",
+        "Lasker Trap|d2d4 d7d5 c2c4 e7e5 d4e5 d5d4 e2e3 f8b4 c1d2 d4e3 d2b4 e3f2 e1e2 f2g1n",
         // Fishing Pole (Ruy Lopez/Berlin): 5.h3 h5! 6.hxg4?? hxg4 7.Ne1 Qh4 ...Qh2#
-        "e2e4 e7e5 g1f3 b8c6 f1b5 g8f6 e1g1 f6g4 h2h3 h7h5 h3g4 h5g4 f3e1 d8h4 f2f4 g4g3 b1c3 h4h7 c3a4 h7h2",
+        "Fishing Pole|e2e4 e7e5 g1f3 b8c6 f1b5 g8f6 e1g1 f6g4 h2h3 h7h5 h3g4 h5g4 f3e1 d8h4 f2f4 g4g3 b1c3 h4h7 c3a4 h7h2",
         // Noah's Ark Trap (Ruy Lopez): 5.d4? b5 ... 11.Qd5 c4 nhốt Tượng
-        "e2e4 e7e5 g1f3 b8c6 f1b5 a7a6 b5a4 d7d6 d2d4 b7b5 a4b3 c6d4 f3d4 e5d4 d1d4 c7c5 d4d5 c8e6 d5c6 e6d7 c6d5 c5c4",
+        "Noah's Ark|e2e4 e7e5 g1f3 b8c6 f1b5 a7a6 b5a4 d7d6 d2d4 b7b5 a4b3 c6d4 f3d4 e5d4 d1d4 c7c5 d4d5 c8e6 d5c6 e6d7 c6d5 c5c4",
         // Budapest Gambit - Kieninger Trap: ...Nd3# (mã chiếu hết)
-        "d2d4 g8f6 c2c4 e7e5 d4e5 f6g4 c1f4 b8c6 g1f3 f8b4 b1d2 d8e7 a2a3 g4e5 a3b4 e5d3",
+        "Budapest (Kieninger)|d2d4 g8f6 c2c4 e7e5 d4e5 f6g4 c1f4 b8c6 g1f3 f8b4 b1d2 d8e7 a2a3 g4e5 a3b4 e5d3",
         // Budapest Gambit - Fajarowicz: 3.dxe5 Ne4 ... ...Nd3#
-        "d2d4 g8f6 c2c4 e7e5 d4e5 f6e4 d1c2 f8b4 b1d2 d7d5 e5d6 c8f5 c2a4 b8c6 a2a3 e4c5 d6c7 d8e7 a4d1 c5d3",
+        "Budapest (Fajarowicz)|d2d4 g8f6 c2c4 e7e5 d4e5 f6e4 d1c2 f8b4 b1d2 d7d5 e5d6 c8f5 c2a4 b8c6 a2a3 e4c5 d6c7 d8e7 a4d1 c5d3",
         // Latvian Gambit: 2...f5 3.Nxe5 Qf6 4.d4 d6 5.Nc4 fxe4 6.Nc3 Qg6
-        "e2e4 e7e5 g1f3 f7f5 f3e5 d8f6 d2d4 d7d6 e5c4 f5e4 b1c3 f6g6"
+        "Latvian Gambit|e2e4 e7e5 g1f3 f7f5 f3e5 d8f6 d2d4 d7d6 e5c4 f5e4 b1c3 f6g6",
+        // Lucchini Gambit (Giuoco Pianissimo): 4.d3 f5!? 5.Ng5 f4 6.Nf7 Qh4 7.O-O Nf6 (Đen hy sinh quân để tấn công f2)
+        "Lucchini Gambit|e2e4 e7e5 g1f3 b8c6 f1c4 f8c5 d2d3 f7f5 f3g5 f5f4 g5f7 d8h4 e1g1 g8f6"
     )
 
     // Mẫu hình bóng 12x12 đã chuẩn hóa ZNCC, gộp Trắng/Đen cùng loại (khóa = chữ HOA)
@@ -338,13 +352,18 @@ class OverlayService : Service() {
             layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT)
         }
 
-        tvStatus = TextView(this).apply { text = "Chess Pro v10.3 • Sẵn sàng"; setTextColor(Color.parseColor("#00E676")); textSize = 11.5f; gravity = Gravity.CENTER; setPadding(0, 0, 0, 8) }
+        tvStatus = TextView(this).apply { text = "Chess Pro v10.5 • Sẵn sàng"; setTextColor(Color.parseColor("#00E676")); textSize = 11.5f; gravity = Gravity.CENTER; setPadding(0, 0, 0, 8) }
         tvFenDebug = TextView(this).apply { text = "Chưa quét bàn cờ"; setTextColor(Color.parseColor("#f1c40f")); textSize = 9.5f; gravity = Gravity.CENTER; maxLines = 1; setPadding(0, 0, 0, 12) }
 
         val row1 = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, LinearLayout.LayoutParams.WRAP_CONTENT) }
-        btnSide = createButton("⚪ Phe: Trắng", "#2980b9") {
-            chessOverlayView.isWhiteBottom = !chessOverlayView.isWhiteBottom
-            btnSide.text = if (chessOverlayView.isWhiteBottom) "⚪ Phe: Trắng" else "⚫ Phe: Đen"
+        btnSide = createButton("🤖 Phe: Tự động", "#2980b9") {
+            // Vòng: Tự động -> Trắng -> Đen -> Tự động
+            if (autoSide) { autoSide = false; chessOverlayView.isWhiteBottom = true }
+            else if (chessOverlayView.isWhiteBottom) { chessOverlayView.isWhiteBottom = false }
+            else { autoSide = true }
+            sideDetected = false
+            btnSide.text = if (autoSide) "🤖 Phe: Tự động" else if (chessOverlayView.isWhiteBottom) "⚪ Phe: Trắng" else "⚫ Phe: Đen"
+            previousValidMatrix = null     // coi như vào giữa ván: đoán lại lượt & nhập thành
             resetState()
         }
         btnTurn = createButton("🔄 Lượt", "#2980b9") {
@@ -568,6 +587,8 @@ class OverlayService : Service() {
 
     private fun resetState() {
         lastCompletedStateKey = ""
+        activeTrapName = null; trapExitNote = ""
+        sideDetected = false
         stateGeneration.incrementAndGet()
         debounceRetries = 0
         pendingStableMatrix = null
@@ -897,6 +918,19 @@ class OverlayService : Service() {
                 scheduleRetry(); return
             }
 
+            // Tự nhận hướng bàn cờ từ vị trí Tốt/Vua (chỉ làm 1 lần mỗi ván để không bị lật giữa chừng)
+            if (autoSide && !sideDetected) {
+                val guess = guessWhiteBottom(rawMatrix)
+                if (guess != null) {
+                    sideDetected = true
+                    if (guess != chessOverlayView.isWhiteBottom) {
+                        chessOverlayView.isWhiteBottom = guess
+                        previousValidMatrix = null; pendingStableMatrix = null; consecutiveMatchCount = 0
+                    }
+                    mainHandler.post { btnSide.text = if (guess) "🤖 Phe: Trắng" else "🤖 Phe: Đen" }
+                }
+            }
+
             val standardMatrix = if (chessOverlayView.isWhiteBottom) rawMatrix else Array(8) { r -> CharArray(8) { c -> rawMatrix[7 - r][7 - c] } }
 
             val validationError = validatePositionStrict(standardMatrix)
@@ -942,8 +976,9 @@ class OverlayService : Service() {
                 if (forced == null && !isKingAttacked(standardMatrix, white = (other == 'b'))) {
                     activeTurn = other; lastDetectedTurn = other
                 } else {
-                    mainHandler.post { tvStatus.text = "Thế cờ không hợp lệ (vua bị chiếu sai lượt)" }
-                    return
+                    mainHandler.post { tvStatus.text = "Thế cờ không hợp lệ (vua bị chiếu sai lượt) - thử bấm 🔄 Lượt" }
+                    pendingStableMatrix = null; consecutiveMatchCount = 0
+                    scheduleRetry(); return
                 }
             }
 
@@ -961,23 +996,39 @@ class OverlayService : Service() {
 
             // Khai cuộc bẫy: ưu tiên nước trong sách bẫy nếu thế cờ khớp
             if (trapMode) {
-                val trapMove = (if (activeTurn == 'w') trapBookWhite else trapBookBlack)["$boardFen $activeTurn"]?.random()
+                val bookKey = "$boardFen $activeTurn"
+                val trapMove = (if (activeTurn == 'w') trapBookWhite else trapBookBlack)[bookKey]?.random()
                 if (trapMove != null) {
                     lastCompletedStateKey = stateKey
-                    mainHandler.post { chessOverlayView.setMove(trapMove); tvStatus.text = "🪤 Bẫy: ${formatMoveText(trapMove)}" }
+                    val tName = trapNames["$bookKey $trapMove"]?.joinToString(" / ") ?: "?"
+                    activeTrapName = tName; activeTrapFinal = trapFinalKeys.contains("$bookKey $trapMove"); trapExitNote = ""
+                    mainHandler.post { chessOverlayView.setMove(trapMove); tvStatus.text = "🪤 Bẫy $tName: ${formatMoveText(trapMove)}" }
                     return
                 }
+            }
+
+            // Chẩn đoán: cho biết vì sao không có bẫy ở thế này
+            mainHandler.post { tvFenDebug.text = if (!trapMode) "🪤 Bẫy đang TẮT (bấm nút Bẫy để bật)" else "📖 Không có bẫy ở thế này ($activeTurn): $boardFen" }
+
+            // Đang theo bẫy mà thế cờ không còn trong sách => báo quay lại đánh bình thường
+            val leftTrap = activeTrapName
+            if (leftTrap != null) {
+                trapExitNote = if (activeTrapFinal) "  (🏁 đã hết bẫy $leftTrap - đánh bình thường)"
+                               else "  (↩️ đối thủ KHÔNG dính bẫy $leftTrap - đánh bình thường)"
+                activeTrapName = null
+                val note = trapExitNote.trim()
+                mainHandler.post { Toast.makeText(this@OverlayService, note, Toast.LENGTH_LONG).show() }
             }
 
             val fullFen = "$boardFen $activeTurn $castling $ep 0 1"
             val cachedMove = moveCache[fullFen]
             if (cachedMove != null) {
                 lastCompletedStateKey = stateKey
-                mainHandler.post { chessOverlayView.setMove(cachedMove); tvStatus.text = "⚡ Đi: ${formatMoveText(cachedMove)}" }
+                mainHandler.post { chessOverlayView.setMove(cachedMove); tvStatus.text = "⚡ Đi: ${formatMoveText(cachedMove)}$trapExitNote"; trapExitNote = "" }
                 return
             }
 
-            mainHandler.post { chessOverlayView.setMove(null); tvStatus.text = "⚡ Đang tính..." }
+            mainHandler.post { chessOverlayView.setMove(null); tvStatus.text = "⚡ Đang tính...$trapExitNote" }
             val bestMove = raceBothStockfishServers(fullFen)
 
             val apiErr = if (bestMove == null) apiErrorSummary() else ""
@@ -990,7 +1041,7 @@ class OverlayService : Service() {
                     moveCache[fullFen] = bestMove
                     lastCompletedStateKey = stateKey
                     chessOverlayView.setMove(bestMove)
-                    tvStatus.text = "✅ Đề xuất: ${formatMoveText(bestMove)}"
+                    tvStatus.text = "✅ Đề xuất: ${formatMoveText(bestMove)}$trapExitNote"; trapExitNote = ""
                 } else {
                     tvStatus.text = "⏳ Lỗi API: $apiErr"
                     tvFenDebug.text = fullFen
@@ -1030,16 +1081,20 @@ class OverlayService : Service() {
     }
 
     private fun buildTrapBook() {
-        trapBookWhite.clear(); trapBookBlack.clear()
+        trapBookWhite.clear(); trapBookBlack.clear(); trapNames.clear(); trapFinalKeys.clear()
         fun feed(lines: List<String>, mineIsWhite: Boolean) {
-            for (line in lines) {
+            for (entry in lines) {
+                val name = entry.substringBefore("|"); val line = entry.substringAfter("|")
                 val m = fenToMatrix(START_BOARD)
-                line.trim().split(" ").forEachIndexed { i, mv ->
+                val mvs = line.trim().split(" ")
+                mvs.forEachIndexed { i, mv ->
                     val whiteToMove = i % 2 == 0
                     if (whiteToMove == mineIsWhite) {
                         val key = buildFenBoardString(m) + (if (whiteToMove) " w" else " b")
                         val list = (if (mineIsWhite) trapBookWhite else trapBookBlack).getOrPut(key) { ArrayList() }
                         if (!list.contains(mv)) list.add(mv)
+                        trapNames.getOrPut("$key $mv") { LinkedHashSet() }.add(name)
+                        if (i == mvs.size - 1) trapFinalKeys.add("$key $mv")
                     }
                     applyUci(m, mv)
                 }
@@ -1047,6 +1102,7 @@ class OverlayService : Service() {
         }
         feed(trapLinesWhite, true)
         feed(trapLinesBlack, false)
+        mainHandler.post { tvFenDebug.text = "📖 Sách bẫy: ${trapBookWhite.size} thế Trắng, ${trapBookBlack.size} thế Đen" }
     }
 
     private fun areMatricesEqual(m1: Array<CharArray>, m2: Array<CharArray>): Boolean {
@@ -1168,6 +1224,20 @@ class OverlayService : Service() {
         return false
     }
 
+    // Đoán Trắng có ở dưới màn hình không: Tốt/Vua Trắng thường nằm thấp hơn Tốt/Vua Đen. null = chưa đủ chắc.
+    private fun guessWhiteBottom(raw: Array<CharArray>): Boolean? {
+        var wSum = 0.0; var wN = 0.0; var bSum = 0.0; var bN = 0.0
+        for (r in 0..7) for (c in 0..7) {
+            val ch = raw[r][c]
+            val w = when (ch.uppercaseChar()) { 'P' -> 1.0; 'K' -> 2.0; else -> 0.0 }
+            if (w == 0.0) continue
+            if (ch.isUpperCase()) { wSum += r * w; wN += w } else { bSum += r * w; bN += w }
+        }
+        if (wN == 0.0 || bN == 0.0) return null
+        val diff = wSum / wN - bSum / bN
+        return if (diff > 0.8) true else if (diff < -0.8) false else null
+    }
+
     // Lượt đi suy ra từ MÀU quân mới xuất hiện ở ô; luôn cập nhật baseline sau mỗi lần gọi
     private fun determineSideToMove(cur: Array<CharArray>, myColor: Char): Char {
         val snap = copyMatrix(cur)
@@ -1177,7 +1247,9 @@ class OverlayService : Service() {
         }
         val prev = previousValidMatrix
         if (prev == null) {
+            // Vào giữa ván: không biết lịch sử -> đoán tới lượt mình, bỏ quyền nhập thành (an toàn: tránh gợi ý nhập thành bất hợp lệ)
             previousValidMatrix = snap; lastDetectedTurn = myColor; lastEnPassant = "-"
+            castleRights = emptySet()
             return myColor
         }
 
@@ -1380,7 +1452,7 @@ class OverlayService : Service() {
     private fun startForegroundNotification() {
         val channel = NotificationChannel("chess_overlay_channel", "Chess Overlay", NotificationManager.IMPORTANCE_LOW)
         getSystemService(NotificationManager::class.java).createNotificationChannel(channel)
-        val notif = Notification.Builder(this, "chess_overlay_channel").setContentTitle("Chess Pro v10.3").setSmallIcon(android.R.drawable.ic_menu_compass).build()
+        val notif = Notification.Builder(this, "chess_overlay_channel").setContentTitle("Chess Pro v10.5").setSmallIcon(android.R.drawable.ic_menu_compass).build()
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) startForeground(1, notif, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION) else startForeground(1, notif)
     }
 
